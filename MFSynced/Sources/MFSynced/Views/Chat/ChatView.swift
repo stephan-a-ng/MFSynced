@@ -3,6 +3,7 @@ import SwiftUI
 struct ChatView: View {
     let conversation: Conversation
     let messages: [Message]
+    var contact: Contact?
     @Environment(\.colorScheme) private var colorScheme
 
     private var filteredMessages: [Message] {
@@ -38,25 +39,29 @@ struct ChatView: View {
                                     .id(message.id)
                             }
                         }
+
+                        // Invisible anchor at the very bottom
+                        Color.clear
+                            .frame(height: 1)
+                            .id("bottom")
                     }
                     .padding(.vertical, 8)
                 }
-                .onChange(of: messages.count) {
-                    if let lastMsg = filteredMessages.last {
-                        withAnimation {
-                            proxy.scrollTo(lastMsg.id, anchor: .bottom)
-                        }
+                .onAppear {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        proxy.scrollTo("bottom", anchor: .bottom)
                     }
                 }
-                .onAppear {
-                    if let lastMsg = filteredMessages.last {
-                        proxy.scrollTo(lastMsg.id, anchor: .bottom)
+                .onChange(of: messages.count) {
+                    withAnimation {
+                        proxy.scrollTo("bottom", anchor: .bottom)
                     }
                 }
             }
 
             // Compose bar
             ComposeBar(chatIdentifier: conversation.id)
+                .animation(.none, value: 0)
         }
         .background(colorScheme == .dark ? Color.black : Color.white)
     }
@@ -66,7 +71,7 @@ struct ChatView: View {
             avatarSmall
 
             HStack(spacing: 4) {
-                Text(conversation.title)
+                Text(contact?.fullName ?? conversation.title)
                     .font(.headline)
 
                 if conversation.isCRMSynced {

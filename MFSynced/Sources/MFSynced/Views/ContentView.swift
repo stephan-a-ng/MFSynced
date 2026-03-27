@@ -14,7 +14,7 @@ final class AppState {
     private var lastSeenRowID: Int64 = 0
     private var pollTimer: Timer?
     private var crmService: CRMSyncService?
-    private let contactStore = ContactStore()
+    let contactStore = ContactStore()
 
     init() {
         self.crmConfig = CRMConfig.load()
@@ -163,7 +163,8 @@ struct ContentView: View {
             if let conversation = appState.selectedConversation {
                 ChatView(
                     conversation: conversation,
-                    messages: appState.messages
+                    messages: appState.messages,
+                    contact: appState.contactStore.contact(for: conversation.id)
                 )
             } else {
                 Text("Select a conversation")

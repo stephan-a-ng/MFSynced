@@ -2,7 +2,13 @@ import Foundation
 import UserNotifications
 
 enum NotificationService {
+    /// Whether UNUserNotificationCenter is available (requires app bundle)
+    private static var isAvailable: Bool {
+        Bundle.main.bundleIdentifier != nil
+    }
+
     static func requestPermission() async -> Bool {
+        guard isAvailable else { return false }
         do {
             return try await UNUserNotificationCenter.current()
                 .requestAuthorization(options: [.alert, .sound, .badge])
@@ -16,6 +22,7 @@ enum NotificationService {
         text: String,
         chatIdentifier: String
     ) {
+        guard isAvailable else { return }
         let enabled = UserDefaults.standard.bool(forKey: "mfsynced_notifications_enabled")
         guard enabled else { return }
 

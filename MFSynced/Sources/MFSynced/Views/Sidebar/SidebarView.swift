@@ -4,6 +4,8 @@ struct SidebarView: View {
     @Bindable var appState: AppState
     @State private var searchText: String = ""
 
+    @State private var isSyncingContacts = false
+
     var body: some View {
         VStack(spacing: 0) {
             // Search bar
@@ -31,6 +33,25 @@ struct SidebarView: View {
                     }
                     .buttonStyle(.plain)
                 }
+                Button(action: {
+                    isSyncingContacts = true
+                    Task {
+                        await appState.contactStore.refresh()
+                        isSyncingContacts = false
+                    }
+                }) {
+                    if isSyncingContacts {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 16, height: 16)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("Sync Contacts")
             }
             .padding(8)
 
@@ -72,56 +93,64 @@ struct SidebarView: View {
     }
 
     private var conversationsList: some View {
-        List(appState.conversations, selection: Binding<Conversation?>(
-            get: { appState.selectedConversation },
-            set: { conv in
-                if let conv {
-                    appState.selectConversation(conv)
-                }
-            }
-        )) { conversation in
-            HStack(spacing: 10) {
-                AvatarView(
-                    conversation: conversation,
-                    isSelected: appState.selectedConversation?.id == conversation.id
-                )
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(appState.conversations) { conversation in
+                    let isSelected = appState.selectedConversation?.id == conversation.id
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(conversation.title)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
+                    HStack(spacing: 10) {
+                        let contact = appState.contactStore.contact(for: conversation.id)
 
-                    if let lastMsg = conversation.lastMessage {
-                        Text(lastMsg.displayText ?? "")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                        AvatarView(
+                            conversation: conversation,
+                            isSelected: isSelected,
+                            contact: contact
+                        )
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(contact.fullName ?? conversation.title)
+                                .font(.system(size: 13, weight: .semibold))
+                                .lineLimit(1)
+
+                            if let lastMsg = conversation.lastMessage {
+                                Text(lastMsg.displayText ?? "")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+
+                        Spacer()
+
+                        if let lastMsg = conversation.lastMessage {
+                            Text(lastMsg.formattedTime)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                }
-
-                Spacer()
-
-                if let lastMsg = conversation.lastMessage {
-                    Text(lastMsg.formattedTime)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.vertical, 4)
-            .tag(conversation)
-            .contextMenu {
-                Button(conversation.isCRMSynced ? "Disable CRM Sync" : "Enable CRM Sync") {
-                    appState.toggleCRMSync(for: conversation)
-                }
-                if conversation.isCRMSynced {
-                    Button("Sync History to CRM") {
-                        Task {
-                            await appState.syncHistoryToCRM(for: conversation)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(isSelected ? Color.accentColor.opacity(0.2) : Color.clear)
+                    .cornerRadius(8)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        appState.selectConversation(conversation)
+                    }
+                    .contextMenu {
+                        Button(conversation.isCRMSynced ? "Disable CRM Sync" : "Enable CRM Sync") {
+                            appState.toggleCRMSync(for: conversation)
+                        }
+                        if conversation.isCRMSynced {
+                            Button("Sync History to CRM") {
+                                Task {
+                                    await appState.syncHistoryToCRM(for: conversation)
+                                }
+                            }
                         }
                     }
                 }
             }
+            .padding(.horizontal, 4)
         }
-        .listStyle(.sidebar)
     }
 }

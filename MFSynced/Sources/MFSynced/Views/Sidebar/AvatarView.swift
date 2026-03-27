@@ -3,6 +3,7 @@ import SwiftUI
 struct AvatarView: View {
     let conversation: Conversation
     let isSelected: Bool
+    var contact: Contact?
 
     private var avatarColor: Color {
         let hash = abs(conversation.id.hashValue)
@@ -13,15 +14,31 @@ struct AvatarView: View {
         return colors[hash % colors.count]
     }
 
+    private var displayInitials: String {
+        if let name = contact?.fullName, !name.isEmpty {
+            let words = name.split(separator: " ").prefix(2)
+            return words.map { String($0.prefix(1)).uppercased() }.joined()
+        }
+        return conversation.initials
+    }
+
     var body: some View {
         ZStack {
-            Circle()
-                .fill(avatarColor)
-                .frame(width: 44, height: 44)
+            if let photo = contact?.photo {
+                Image(nsImage: photo)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 44, height: 44)
+                    .clipShape(Circle())
+            } else {
+                Circle()
+                    .fill(avatarColor)
+                    .frame(width: 44, height: 44)
 
-            Text(conversation.initials)
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white)
+                Text(displayInitials)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
+            }
 
             if conversation.isCRMSynced {
                 Circle()
