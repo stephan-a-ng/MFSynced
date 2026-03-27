@@ -37,7 +37,7 @@ struct ComposeBar: View {
     private func sendMessage() {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        print("TODO: Send '\(trimmed)' to \(chatIdentifier)")
+        MessageSender.send(text: trimmed, to: chatIdentifier)
         text = ""
     }
 }
