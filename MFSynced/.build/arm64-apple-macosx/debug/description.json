@@ -1,0 +1,850 @@
+{
+  "builtTestProducts" : [
+    {
+      "binaryPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.xctest/Contents/MacOS/MFSyncedPackageTests",
+      "packagePath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced",
+      "productName" : "MFSyncedPackageTests"
+    }
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.MFSynced-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/sources",
+      "importPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/MFSyncedApp.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/CRMConfig.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Contact.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Conversation.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Message.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Utilities/AppleDateConverter.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Utilities/AttributedBodyParser.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Views/ContentView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Views/Settings/SettingsView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "MFSynced",
+      "moduleOutputPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules/MFSynced.swiftmodule",
+      "objects" : [
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/MFSyncedApp.swift.o",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/CRMConfig.swift.o",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Contact.swift.o",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Conversation.swift.o",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Message.swift.o",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/AppleDateConverter.swift.o",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/AttributedBodyParser.swift.o",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/ContentView.swift.o",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/SettingsView.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-j14",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "MFSynced_main",
+        "-swift-version",
+        "5",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "mfsynced"
+      ],
+      "outputFileMapPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/MFSyncedApp.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/CRMConfig.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Contact.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Conversation.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Message.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/AppleDateConverter.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/AttributedBodyParser.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/ContentView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/SettingsView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules/MFSynced.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/MFSyncedApp.swift",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/CRMConfig.swift",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Contact.swift",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Conversation.swift",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Message.swift",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Utilities/AppleDateConverter.swift",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Utilities/AttributedBodyParser.swift",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Views/ContentView.swift",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Views/Settings/SettingsView.swift"
+      ],
+      "tempsPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.MFSyncedPackageTests-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/sources",
+      "importPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.derived/runner.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules/MFSyncedTests.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "MFSyncedPackageTests",
+      "moduleOutputPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules/MFSyncedPackageTests.swiftmodule",
+      "objects" : [
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/runner.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j14",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/include/MFSyncedPackageTests-Swift.h",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "mfsynced"
+      ],
+      "outputFileMapPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules/MFSyncedPackageTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.derived/runner.swift"
+      ],
+      "tempsPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build",
+      "wholeModuleOptimization" : false
+    },
+    "C.MFSyncedTests-arm64-apple-macosx26.0-debug.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedTests.build/sources",
+      "importPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Tests/MFSyncedTests/PlaceholderTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "MFSyncedTests",
+      "moduleOutputPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules/MFSyncedTests.swiftmodule",
+      "objects" : [
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedTests.build/PlaceholderTests.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-incremental",
+        "-enable-batch-mode",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/index/store",
+        "-Onone",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j14",
+        "-DSWIFT_PACKAGE",
+        "-DDEBUG",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-swift-version",
+        "5",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "mfsynced"
+      ],
+      "outputFileMapPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedTests.build/PlaceholderTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules/MFSyncedTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/stephan/MoonFive/imessage-tail/MFSynced/Tests/MFSyncedTests/PlaceholderTests.swift"
+      ],
+      "tempsPath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedTests.build",
+      "wholeModuleOptimization" : false
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "MFSynced" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "MFSynced",
+      "-package-name",
+      "mfsynced",
+      "-c",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/MFSyncedApp.swift",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/CRMConfig.swift",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Contact.swift",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Conversation.swift",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Message.swift",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Utilities/AppleDateConverter.swift",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Utilities/AttributedBodyParser.swift",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Views/ContentView.swift",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Views/Settings/SettingsView.swift",
+      "-I",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-j14",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "MFSynced_main",
+      "-swift-version",
+      "5",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "mfsynced",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "MFSyncedPackageTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "MFSyncedPackageTests",
+      "-package-name",
+      "mfsynced",
+      "-c",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.derived/runner.swift",
+      "-I",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j14",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/include/MFSyncedPackageTests-Swift.h",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "mfsynced",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "MFSyncedTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "MFSyncedTests",
+      "-package-name",
+      "mfsynced",
+      "-c",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/Tests/MFSyncedTests/PlaceholderTests.swift",
+      "-I",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-incremental",
+      "-enable-batch-mode",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/index/store",
+      "-Onone",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j14",
+      "-DSWIFT_PACKAGE",
+      "-DDEBUG",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-swift-version",
+      "5",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.2.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/PrivateFrameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "mfsynced",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "MFSynced" : [
+
+    ],
+    "MFSyncedPackageTests" : [
+      "MFSyncedTests",
+      "MFSynced"
+    ],
+    "MFSyncedTests" : [
+      "MFSynced"
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+    "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.derived/runner.swift" : {
+      "inputs" : [
+
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.derived/runner.swift"
+        }
+      ]
+    }
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced-entitlement.plist" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<entitlement-plist>"
+        },
+        {
+          "kind" : "virtual",
+          "name" : "<com.apple.security.get-task-allow>"
+        }
+      ],
+      "outputFilePath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced-entitlement.plist"
+    },
+    "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/MFSyncedApp.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/CRMConfig.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Contact.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Conversation.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Models/Message.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Utilities/AppleDateConverter.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Utilities/AttributedBodyParser.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Views/ContentView.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Sources/MFSynced/Views/Settings/SettingsView.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/sources"
+    },
+    "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/AppleDateConverter.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/AttributedBodyParser.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/CRMConfig.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Contact.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/ContentView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Conversation.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/MFSyncedApp.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Message.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/SettingsView.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.product/Objects.LinkFileList"
+    },
+    "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.derived/runner.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/sources"
+    },
+    "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/AppleDateConverter.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/AttributedBodyParser.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/CRMConfig.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Contact.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/ContentView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Conversation.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/MFSyncedApp.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/Message.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSynced.build/SettingsView.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedTests.build/PlaceholderTests.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.product/Objects.LinkFileList"
+    },
+    "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/Tests/MFSyncedTests/PlaceholderTests.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedTests.build/sources"
+    },
+    "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/swift-version--58304C5D6DBC2206.txt"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/master.swiftdeps"
+  },
+  "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.derived/runner.swift": {
+    "dependencies": "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/runner.d",
+    "object": "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/runner.swift.o",
+    "swiftmodule": "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/runner~partial.swiftmodule",
+    "swift-dependencies": "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/runner.swiftdeps",
+    "diagnostics": "/Users/stephan/MoonFive/imessage-tail/MFSynced/.build/arm64-apple-macosx/debug/MFSyncedPackageTests.build/runner.dia"
+  }
+}
