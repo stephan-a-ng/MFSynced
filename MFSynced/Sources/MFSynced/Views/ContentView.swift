@@ -13,6 +13,8 @@ final class AppState {
     private var chatDB: ChatDatabase
     private var lastSeenRowID: Int64 = 0
     private var pollTimer: Timer?
+    private var crmService: CRMSyncService?
+    private let contactStore = ContactStore()
 
     init() {
         self.crmConfig = CRMConfig.load()
@@ -26,6 +28,15 @@ final class AppState {
         } catch {
             print("Failed to get max row ID: \(error)")
         }
+
+        crmService = CRMSyncService(config: crmConfig)
+        if crmConfig.isEnabled {
+            crmService?.startPolling()
+        }
+
+        Task { _ = await NotificationService.requestPermission() }
+        Task { _ = await contactStore.requestAccess() }
+
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.pollForNewMessages()
@@ -35,6 +46,7 @@ final class AppState {
     func stopPolling() {
         pollTimer?.invalidate()
         pollTimer = nil
+        crmService?.stopPolling()
     }
 
     func selectConversation(_ conversation: Conversation) {
@@ -69,6 +81,19 @@ final class AppState {
 
             if let maxID = newMessages.map(\.id).max() {
                 lastSeenRowID = maxID
+            }
+
+            // Queue each new message for CRM sync and fire notifications
+            for msg in newMessages {
+                crmService?.queueInbound(message: msg)
+                if !msg.isFromMe && !msg.isTapback {
+                    let sender = msg.senderID ?? "Unknown"
+                    NotificationService.showMessageNotification(
+                        sender: sender,
+                        text: msg.displayText ?? "[Attachment]",
+                        chatIdentifier: msg.chatIdentifier ?? ""
+                    )
+                }
             }
 
             // Reload conversations to pick up new last-message ordering
@@ -122,8 +147,7 @@ final class AppState {
     }
 
     func syncHistoryToCRM(for conversation: Conversation) async {
-        // Placeholder — will be wired in Task 10
-        print("TODO: Sync history for \(conversation.id) to CRM")
+        await crmService?.syncHistory(chatIdentifier: conversation.id, chatDB: chatDB)
     }
 }
 
