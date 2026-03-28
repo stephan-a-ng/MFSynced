@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-background: oklch(1 0 0);
+  --color-foreground: oklch(0.145 0.004 285.82);
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.145 0.004 285.82);
+  --color-primary: oklch(0.546 0.245 262.88);
+  --color-primary-foreground: oklch(0.985 0.002 247.86);
+  --color-muted: oklch(0.967 0.001 286.38);
+  --color-muted-foreground: oklch(0.556 0.014 285.94);
+  --color-border: oklch(0.922 0.004 286.32);
+  --color-input: oklch(0.922 0.004 286.32);
+  --color-ring: oklch(0.546 0.245 262.88);
+  --color-destructive: oklch(0.577 0.245 27.33);
+  --color-destructive-foreground: oklch(0.985 0.002 0);
+
+  --radius-lg: 0.5rem;
+  --radius-md: calc(var(--radius-lg) - 2px);
+  --radius-sm: calc(var(--radius-lg) - 4px);
+
+  --animate-fade-in: fade-in 0.2s ease-out;
+}
+
+@layer base {
+  .dark {
+    --color-background: oklch(0.145 0.004 285.82);
+    --color-foreground: oklch(0.985 0.002 247.86);
+    --color-card: oklch(0.205 0.006 285.88);
+    --color-card-foreground: oklch(0.985 0.002 247.86);
+    --color-primary: oklch(0.623 0.214 259.13);
+    --color-primary-foreground: oklch(0.985 0.002 247.86);
+    --color-muted: oklch(0.269 0.006 286.03);
+    --color-muted-foreground: oklch(0.711 0.013 286.07);
+    --color-border: oklch(0.355 0.008 285.95);
+    --color-input: oklch(0.355 0.008 285.95);
+    --color-ring: oklch(0.623 0.214 259.13);
+    --color-destructive: oklch(0.577 0.245 27.33);
+    --color-destructive-foreground: oklch(0.985 0.002 0);
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: oklch(0.7 0 0 / 0.3) transparent;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
