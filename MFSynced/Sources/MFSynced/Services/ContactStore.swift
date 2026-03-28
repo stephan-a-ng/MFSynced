@@ -65,6 +65,7 @@ final class ContactStore {
         let keysToFetch: [CNKeyDescriptor] = [
             CNContactGivenNameKey as CNKeyDescriptor,
             CNContactFamilyNameKey as CNKeyDescriptor,
+            CNContactOrganizationNameKey as CNKeyDescriptor,
             CNContactThumbnailImageDataKey as CNKeyDescriptor,
             CNContactPhoneNumbersKey as CNKeyDescriptor,
         ]
@@ -74,9 +75,13 @@ final class ContactStore {
 
         do {
             try store.enumerateContacts(with: req) { cnContact, _ in
-                let name = [cnContact.givenName, cnContact.familyName]
+                var name = [cnContact.givenName, cnContact.familyName]
                     .filter { !$0.isEmpty }
                     .joined(separator: " ")
+                // Fall back to organization name if no personal name
+                if name.isEmpty {
+                    name = cnContact.organizationName
+                }
                 guard !name.isEmpty else { return }
 
                 var photo: NSImage?
