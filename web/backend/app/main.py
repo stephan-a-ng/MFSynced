@@ -10,7 +10,7 @@ from slowapi.errors import RateLimitExceeded
 from app.config import settings
 from app.db import init_pool, close_pool
 from app.rate_limit import limiter
-from app.api import auth, health, users
+from app.api import auth, health, users, agent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -54,3 +54,4 @@ async def global_exception_handler(request: Request, exc: Exception):
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(users.router)
+app.include_router(agent.router)
