@@ -61,19 +61,20 @@ async def google_auth(
 
     role = "admin" if email == settings.ADMIN_EMAIL else "member"
 
-    # Upsert user
-    user = await conn.fetchrow("SELECT * FROM users WHERE google_id = $1", google_id)
-    if user is None:
-        user = await conn.fetchrow(
-            """INSERT INTO users (google_id, email, name, photo_url, role)
-               VALUES ($1, $2, $3, $4, $5) RETURNING *""",
-            google_id, email, name, picture, role,
-        )
-    else:
-        user = await conn.fetchrow(
-            """UPDATE users SET name = $1, photo_url = $2, role = $3 WHERE id = $4 RETURNING *""",
-            name, picture, role, user["id"],
-        )
+    # Upsert by email — handles first-time real login after a dev-login bootstrap
+    # (dev bootstrap inserts a row with email but a fake google_id; real login
+    #  must overwrite the google_id so subsequent lookups work correctly)
+    user = await conn.fetchrow(
+        """INSERT INTO users (google_id, email, name, photo_url, role)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (email) DO UPDATE
+           SET google_id = EXCLUDED.google_id,
+               name = EXCLUDED.name,
+               photo_url = EXCLUDED.photo_url,
+               role = EXCLUDED.role
+           RETURNING *""",
+        google_id, email, name, picture, role,
+    )
 
     jwt_token = create_user_token(user["id"], user["role"])
     return TokenResponse(access_token=jwt_token)
