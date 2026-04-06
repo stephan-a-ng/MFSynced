@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, NavLink, useNavigate } from 'react-router-dom';
 import { Inbox, Smartphone, LogOut, Loader2 } from 'lucide-react';
 import { useAuthStore } from './stores/authStore';
+import { authApi } from './api/auth';
 import { ThemeToggle } from './components/ThemeToggle';
 import { LoginPage } from './pages/LoginPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
@@ -10,9 +11,12 @@ import { ConversationsPage } from './pages/ConversationsPage';
 import { ThreadViewPage } from './pages/ThreadViewPage';
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
-  const { user, token, loading, loadUser } = useAuthStore();
+  const { user, token, loading, loadUser, setAppEnv } = useAuthStore();
 
-  useEffect(() => { loadUser(); }, []);
+  useEffect(() => {
+    loadUser();
+    authApi.config().then((cfg) => setAppEnv(cfg.env)).catch(() => {});
+  }, []);
 
   if (loading) {
     return (
@@ -27,7 +31,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 }
 
 function Layout({ children }: { children: React.ReactNode }) {
-  const { user, logout } = useAuthStore();
+  const { user, logout, appEnv } = useAuthStore();
   const navigate = useNavigate();
 
   const handleLogout = () => {
@@ -45,7 +49,14 @@ function Layout({ children }: { children: React.ReactNode }) {
       {/* Sidebar */}
       <div className="w-56 border-r border-border flex flex-col bg-card">
         <div className="p-4 border-b border-border">
-          <h1 className="font-bold text-lg text-foreground">MFSynced</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="font-bold text-lg text-foreground">MFSynced</h1>
+            {appEnv === 'staging' && (
+              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase rounded bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                Staging
+              </span>
+            )}
+          </div>
           <p className="text-xs text-muted-foreground">Team iMessage Hub</p>
         </div>
 

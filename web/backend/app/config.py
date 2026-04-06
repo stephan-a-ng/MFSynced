@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str = ""
     ALLOWED_EMAIL_DOMAIN: str = "moonfive.tech"
     ADMIN_EMAIL: str = "stephan@moonfive.tech"
+    CORS_ORIGINS: str = "http://localhost:5173,http://localhost:3000"
+    UPLOAD_DIR: str = "uploads"
+    MAX_UPLOAD_MB: int = 50
+    APP_ENV: str = "development"
 
     model_config = {"env_file": _env_file, "extra": "ignore"}
 

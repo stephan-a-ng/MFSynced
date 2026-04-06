@@ -25,10 +25,18 @@ export function ThreadViewPage() {
     bottomRef.current?.scrollIntoView();
   }, [data?.messages.length]);
 
-  const handleReply = async (text: string) => {
+  const handleReply = async (text: string, attachmentType?: string, attachmentUrl?: string) => {
     if (!threadId) return;
-    await inboxApi.reply(threadId, text);
+    await inboxApi.reply(threadId, text, attachmentType, attachmentUrl);
     // Refresh messages
+    const updated = await inboxApi.get(threadId);
+    setData(updated);
+  };
+
+  const handleReact = async (messageGuid: string, reactionType: string) => {
+    if (!threadId) return;
+    await inboxApi.react(threadId, messageGuid, reactionType);
+    // Refresh to show updated reactions
     const updated = await inboxApi.get(threadId);
     setData(updated);
   };
@@ -90,7 +98,9 @@ export function ThreadViewPage() {
           <div key={g.date}>
             <p className="text-center text-xs text-muted-foreground my-3">{g.date}</p>
             <div className="space-y-1">
-              {g.messages.map(m => <MessageBubble key={m.id} message={m} />)}
+              {g.messages.map(m => (
+                <MessageBubble key={m.id} message={m} onReact={handleReact} />
+              ))}
             </div>
           </div>
         ))}

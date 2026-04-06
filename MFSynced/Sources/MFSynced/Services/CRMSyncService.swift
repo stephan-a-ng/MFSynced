@@ -1,4 +1,27 @@
 import Foundation
+import OSLog
+
+private let crmLogger = Logger(subsystem: "tech.moonfive.MFSynced", category: "CRMSync")
+
+private func crmLog(_ message: String) {
+    crmLogger.info("\(message, privacy: .public)")
+    // Also write to file for easy tailing
+    let path = NSHomeDirectory() + "/Library/Logs/mfsynced_crm.log"
+    let line = "\(Date()): \(message)\n"
+    guard let data = line.data(using: .utf8) else { return }
+    if FileManager.default.fileExists(atPath: path),
+       let handle = FileHandle(forWritingAtPath: path) {
+        handle.seekToEndOfFile()
+        handle.write(data)
+        handle.closeFile()
+    } else {
+        try? FileManager.default.createDirectory(
+            atPath: NSHomeDirectory() + "/Library/Logs",
+            withIntermediateDirectories: true
+        )
+        try? data.write(to: URL(fileURLWithPath: path))
+    }
+}
 
 @Observable
 final class CRMSyncService {
@@ -15,23 +38,29 @@ final class CRMSyncService {
     init(config: CRMConfig, syncQueue: SyncQueueDatabase = SyncQueueDatabase()) {
         self.config = config
         self.syncQueue = syncQueue
+        crmLog("[CRM] init — isEnabled=\(config.isEnabled) endpoint='\(config.apiEndpoint)' synced=\(config.syncedPhoneNumbers.count)")
     }
 
     func updateConfig(_ config: CRMConfig) { self.config = config }
 
     func startPolling() {
-        guard config.isEnabled, !config.apiEndpoint.isEmpty else { return }
+        guard config.isEnabled, !config.apiEndpoint.isEmpty else {
+            crmLog("[CRM] startPolling: skipped — isEnabled=\(config.isEnabled) endpoint='\(config.apiEndpoint)'")
+            return
+        }
+        crmLog("[CRM] startPolling: starting timer every \(config.pollIntervalSeconds)s → \(config.apiEndpoint)")
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: config.pollIntervalSeconds, repeats: true) { [weak self] _ in
+            crmLog("[CRM] timer fired")
             Task { await self?.poll() }
         }
     }
 
     func stopPolling() { pollTimer?.invalidate(); pollTimer = nil }
 
-    func queueInbound(message: Message) {
+    func queueInbound(message: Message, contactName: String? = nil) {
         guard config.syncedPhoneNumbers.contains(message.chatIdentifier ?? "") else { return }
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "id": message.guid,
             "phone": message.senderID ?? message.chatIdentifier ?? "",
             "text": message.displayText ?? "",
@@ -39,12 +68,14 @@ final class CRMSyncService {
             "is_from_me": message.isFromMe,
             "service": message.service,
         ]
+        if let name = contactName { payload["contact_name"] = name }
         guard let jsonData = try? JSONSerialization.data(withJSONObject: payload),
               let jsonString = String(data: jsonData, encoding: .utf8) else { return }
         try? syncQueue.enqueue(direction: "inbound", messageGuid: message.guid, phone: message.chatIdentifier ?? "", payload: jsonString)
     }
 
     func poll() async {
+        crmLog("[CRM] poll() called")
         await pushInbound()
         await pullOutbound()
         await updateCounts()
@@ -86,6 +117,7 @@ final class CRMSyncService {
     }
 
     private func pullOutbound() async {
+        crmLog("[CRM] pullOutbound called → \(config.apiEndpoint)/messages/outbound")
         guard let url = URL(string: "\(config.apiEndpoint)/messages/outbound?agent_id=\(config.agentID)") else { return }
         var request = URLRequest(url: url)
         request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
@@ -121,7 +153,7 @@ final class CRMSyncService {
         _ = try? await session.data(for: request)
     }
 
-    func syncHistory(chatIdentifier: String, chatDB: ChatDatabase) async {
+    func syncHistory(chatIdentifier: String, chatDB: ChatDatabase, contactName: String? = nil) async {
         do {
             let messages = try chatDB.fetchMessages(forChat: chatIdentifier, limit: 10000)
             let batches = stride(from: 0, to: messages.count, by: 100).map {
@@ -129,8 +161,11 @@ final class CRMSyncService {
             }
             for batch in batches {
                 let payload = batch.map { msg -> [String: Any] in
-                    ["id": msg.guid, "phone": msg.senderID ?? chatIdentifier, "text": msg.displayText ?? "",
-                     "timestamp": AppleDateConverter.toISO8601(msg.id) ?? "", "is_from_me": msg.isFromMe, "service": msg.service]
+                    var m: [String: Any] = ["id": msg.guid, "phone": msg.senderID ?? chatIdentifier,
+                     "text": msg.displayText ?? "", "timestamp": AppleDateConverter.toISO8601(msg.id) ?? "",
+                     "is_from_me": msg.isFromMe, "service": msg.service]
+                    if let name = contactName { m["contact_name"] = name }
+                    return m
                 }
                 let body: [String: Any] = ["agent_id": config.agentID, "messages": payload]
                 guard let url = URL(string: "\(config.apiEndpoint)/sync/\(chatIdentifier)/history") else { continue }

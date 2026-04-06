@@ -7,7 +7,9 @@ interface AuthState {
   user: User | null;
   token: string | null;
   loading: boolean;
+  appEnv: string | null;
   setAuth: (user: User, token: string) => void;
+  setAppEnv: (env: string) => void;
   logout: () => void;
   loadUser: () => Promise<void>;
 }
@@ -25,6 +27,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
   user: null,
   token: localStorage.getItem('token'),
   loading: true,
+  appEnv: null,
+
+  setAppEnv: (env) => set({ appEnv: env }),
 
   setAuth: (user, token) => {
     localStorage.setItem('token', token);

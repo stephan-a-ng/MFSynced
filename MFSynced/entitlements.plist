@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Required to attach a debugger in development -->
+	<key>com.apple.security.get-task-allow</key>
+	<true/>
+	<!-- Contacts framework access -->
+	<key>com.apple.security.personal-information.contacts</key>
+	<true/>
+	<!-- Required for ad-hoc signed apps loading dynamic libraries -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

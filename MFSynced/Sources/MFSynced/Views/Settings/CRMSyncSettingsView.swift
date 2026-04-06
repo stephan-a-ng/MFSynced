@@ -7,7 +7,7 @@ struct CRMSyncSettingsView: View {
         Form {
             Section("Connection") {
                 Toggle("CRM Sync Enabled", isOn: $config.isEnabled)
-                TextField("API Endpoint", text: $config.apiEndpoint, prompt: Text("https://crm.example.com/api"))
+                TextField("API Endpoint", text: $config.apiEndpoint, prompt: Text("https://your-backend.com/v1/agent"))
                 SecureField("API Key", text: $config.apiKey, prompt: Text("mf_sk_..."))
                 HStack {
                     Text("Poll interval")

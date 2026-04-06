@@ -58,7 +58,9 @@ struct SidebarView: View {
             Divider()
 
             // Content
-            if appState.isSearching {
+            if let error = appState.dbError {
+                dbErrorView(error)
+            } else if appState.isSearching {
                 searchResultsList
             } else {
                 conversationsList
@@ -90,6 +92,26 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+    }
+
+    private func dbErrorView(_ message: String) -> some View {
+        VStack(spacing: 12) {
+            Image(systemName: "lock.shield")
+                .font(.system(size: 36))
+                .foregroundStyle(.orange)
+            Text(message)
+                .font(.callout)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+            Button("Open Privacy Settings") {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding()
     }
 
     private var conversationsList: some View {

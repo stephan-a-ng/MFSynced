@@ -13,7 +13,7 @@ async def fetch_pending_commands(
         """UPDATE outbound_commands
            SET status = 'sent'
            WHERE agent_id = $1 AND status = 'pending'
-           RETURNING id, phone, text""",
+           RETURNING id, phone, text, attachment_type, attachment_url""",
         agent_id,
     )
     return [dict(r) for r in rows]

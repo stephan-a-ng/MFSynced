@@ -1,3 +1,4 @@
+from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel
 
@@ -15,6 +16,11 @@ class InboundMessage(BaseModel):
     timestamp: str  # ISO8601
     is_from_me: bool = False
     service: str = "iMessage"
+    contact_name: Optional[str] = None         # resolved from Contacts on Mac
+    attachment_type: Optional[str] = None      # 'image', 'video', 'audio'
+    attachment_url: Optional[str] = None
+    attachment_mime_type: Optional[str] = None
+    attachment_filename: Optional[str] = None
 
 class InboundBatch(BaseModel):
     agent_id: str  # UUID as string (Mac app sends this)
@@ -23,10 +29,21 @@ class InboundBatch(BaseModel):
 class InboundResponse(BaseModel):
     confirmed: list[str]  # list of confirmed message guids
 
+class InboundReaction(BaseModel):
+    message_guid: str
+    reaction_type: str  # love, like, dislike, laugh, emphasize, question
+    is_from_me: bool = False
+
+class InboundReactionBatch(BaseModel):
+    agent_id: str
+    reactions: list[InboundReaction]
+
 class OutboundCommand(BaseModel):
     id: UUID
     phone: str
     text: str
+    attachment_type: Optional[str] = None
+    attachment_url: Optional[str] = None
 
 class OutboundResponse(BaseModel):
     messages: list[OutboundCommand]

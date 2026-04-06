@@ -24,6 +24,9 @@ export interface ThreadDetail {
 export const inboxApi = {
   list: () => api.get<InboxThread[]>('/inbox'),
   get: (threadId: string) => api.get<ThreadDetail>(`/inbox/${threadId}`),
-  reply: (threadId: string, text: string) => api.post(`/inbox/${threadId}/reply`, { text }),
+  reply: (threadId: string, text: string, attachmentType?: string, attachmentUrl?: string) =>
+    api.post(`/inbox/${threadId}/reply`, { text, attachment_type: attachmentType, attachment_url: attachmentUrl }),
+  react: (threadId: string, messageGuid: string, reactionType: string) =>
+    api.post<{ status: string }>(`/inbox/${threadId}/react`, { message_guid: messageGuid, reaction_type: reactionType }),
   markRead: (threadId: string) => api.patch(`/inbox/${threadId}/read`, {}),
 };

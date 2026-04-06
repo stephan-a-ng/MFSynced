@@ -3,7 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 import asyncpg
 
 from app.api.deps import get_current_user_id, get_db
-from app.schemas.message import ConversationResponse, MessageResponse
+from app.schemas.message import ConversationResponse, MessageResponse, ReactionResponse
+from app.services.message_service import fetch_messages_with_reactions
 
 router = APIRouter(prefix="/v1/conversations", tags=["conversations"])
 
@@ -38,12 +39,12 @@ async def get_conversation_messages(
     if agent is None:
         raise HTTPException(status_code=403, detail="Not your agent")
 
-    rows = await conn.fetch(
-        """SELECT id, guid, phone, text, timestamp, is_from_me, service
-           FROM messages
-           WHERE phone = $1 AND agent_id = $2
-           ORDER BY timestamp ASC
-           LIMIT $3 OFFSET $4""",
-        phone, agent_id, limit, offset,
-    )
-    return [MessageResponse(**dict(r)) for r in rows]
+    messages = await fetch_messages_with_reactions(conn, phone, agent_id, limit, offset)
+    return [
+        MessageResponse(
+            **{k: m[k] for k in ("id", "guid", "phone", "text", "timestamp", "is_from_me", "service",
+                                  "attachment_type", "attachment_url", "attachment_mime_type", "attachment_filename")},
+            reactions=[ReactionResponse(**r) for r in m["reactions"]],
+        )
+        for m in messages
+    ]

@@ -78,6 +78,85 @@ async def google_auth(
     jwt_token = create_user_token(user["id"], user["role"])
     return TokenResponse(access_token=jwt_token)
 
+@router.get("/config")
+async def auth_config():
+    if settings.APP_ENV in ("staging", "development"):
+        return {"auth_mode": "dev", "env": settings.APP_ENV}
+    return {"auth_mode": "google", "env": settings.APP_ENV}
+
+@router.post("/dev-login", response_model=TokenResponse)
+async def dev_login(
+    conn: asyncpg.Connection = Depends(get_db),
+) -> TokenResponse:
+    if settings.APP_ENV not in ("staging", "development"):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    email = "leroy@moonfive.tech"
+    google_id = "dev-leroy"
+    name = "Leroy"
+    role = "admin" if email == settings.ADMIN_EMAIL else "member"
+
+    user = await conn.fetchrow("SELECT * FROM users WHERE google_id = $1", google_id)
+    if user is None:
+        user = await conn.fetchrow(
+            """INSERT INTO users (google_id, email, name, role)
+               VALUES ($1, $2, $3, $4) RETURNING *""",
+            google_id, email, name, role,
+        )
+
+    jwt_token = create_user_token(user["id"], user["role"])
+    return TokenResponse(access_token=jwt_token)
+
+
+@router.post("/dev-admin-login", response_model=TokenResponse)
+async def dev_admin_login(
+    conn: asyncpg.Connection = Depends(get_db),
+) -> TokenResponse:
+    """Dev-only login as stephan (admin). Creates the admin user if it doesn't exist."""
+    if settings.APP_ENV not in ("staging", "development"):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    email = settings.ADMIN_EMAIL  # stephan@moonfive.tech
+    google_id = "dev-stephan"
+    name = "Stephan"
+    role = "admin"
+
+    user = await conn.fetchrow("SELECT * FROM users WHERE google_id = $1", google_id)
+    if user is None:
+        user = await conn.fetchrow(
+            """INSERT INTO users (google_id, email, name, role)
+               VALUES ($1, $2, $3, $4) RETURNING *""",
+            google_id, email, name, role,
+        )
+
+    jwt_token = create_user_token(user["id"], user["role"])
+    return TokenResponse(access_token=jwt_token)
+
+
+@router.post("/dev-marco-login", response_model=TokenResponse)
+async def dev_marco_login(
+    conn: asyncpg.Connection = Depends(get_db),
+) -> TokenResponse:
+    """Dev-only login as marco@moonfive.tech."""
+    if settings.APP_ENV not in ("staging", "development"):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    email = "marco@moonfive.tech"
+    google_id = "dev-marco"
+    name = "Marco"
+    role = "member"
+
+    user = await conn.fetchrow("SELECT * FROM users WHERE google_id = $1", google_id)
+    if user is None:
+        user = await conn.fetchrow(
+            """INSERT INTO users (google_id, email, name, role)
+               VALUES ($1, $2, $3, $4) RETURNING *""",
+            google_id, email, name, role,
+        )
+
+    jwt_token = create_user_token(user["id"], user["role"])
+    return TokenResponse(access_token=jwt_token)
+
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
     user_id: UUID = Depends(get_current_user_id),

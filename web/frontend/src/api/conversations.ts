@@ -8,6 +8,11 @@ export interface Conversation {
   message_count: number;
 }
 
+export interface Reaction {
+  reaction_type: string;
+  is_from_me: boolean;
+}
+
 export interface Message {
   id: string;
   guid: string;
@@ -16,6 +21,11 @@ export interface Message {
   timestamp: string;
   is_from_me: boolean;
   service: string;
+  attachment_type: string | null;
+  attachment_url: string | null;
+  attachment_mime_type: string | null;
+  attachment_filename: string | null;
+  reactions: Reaction[];
 }
 
 export const conversationsApi = {

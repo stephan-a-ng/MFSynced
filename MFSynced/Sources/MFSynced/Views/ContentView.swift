@@ -9,6 +9,7 @@ final class AppState {
     var searchResults: [Message] = []
     var isSearching: Bool = false
     var crmConfig: CRMConfig
+    var dbError: String? = nil
 
     private var chatDB: ChatDatabase
     private var lastSeenRowID: Int64 = 0
@@ -61,8 +62,18 @@ final class AppState {
                 fetched[i].isCRMSynced = crmConfig.syncedPhoneNumbers.contains(fetched[i].id)
             }
             conversations = fetched
+            dbError = nil
+            // Dump conversation list so external tools can find chat identifiers
+            let dump = fetched.map { "\($0.id)\t\($0.displayName)" }.joined(separator: "\n")
+            try? dump.write(toFile: NSHomeDirectory() + "/Library/Logs/mfsynced_conversations.txt", atomically: true, encoding: .utf8)
         } catch {
             print("Failed to load conversations: \(error)")
+            let msg = error.localizedDescription
+            if msg.contains("authorization denied") || msg.contains("not authorized") {
+                dbError = "Full Disk Access required.\n\nGo to System Settings → Privacy & Security → Full Disk Access and add MFSynced."
+            } else {
+                dbError = "Could not read iMessage database: \(msg)"
+            }
         }
     }
 
@@ -85,7 +96,8 @@ final class AppState {
 
             // Queue each new message for CRM sync and fire notifications
             for msg in newMessages {
-                crmService?.queueInbound(message: msg)
+                let contactName = contactStore.contact(for: msg.chatIdentifier ?? "").fullName
+                crmService?.queueInbound(message: msg, contactName: contactName)
                 if !msg.isFromMe && !msg.isTapback {
                     let sender = msg.senderID ?? "Unknown"
                     NotificationService.showMessageNotification(
@@ -147,18 +159,38 @@ final class AppState {
     }
 
     func syncHistoryToCRM(for conversation: Conversation) async {
-        await crmService?.syncHistory(chatIdentifier: conversation.id, chatDB: chatDB)
+        let contactName = contactStore.contact(for: conversation.id).fullName
+        await crmService?.syncHistory(chatIdentifier: conversation.id, chatDB: chatDB, contactName: contactName)
     }
 }
 
 struct ContentView: View {
     @State private var appState = AppState()
     @State private var columnVisibility = NavigationSplitViewVisibility.all
+    @State private var showSetup = false
+
+    private var needsSetup: Bool {
+        let setupComplete = UserDefaults.standard.bool(forKey: "mfsynced_setup_complete")
+        return !setupComplete || appState.dbError != nil
+    }
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             SidebarView(appState: appState)
                 .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        if appState.dbError != nil {
+                            Button {
+                                showSetup = true
+                            } label: {
+                                Label("Setup", systemImage: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.orange)
+                            }
+                            .help("Fix setup issues")
+                        }
+                    }
+                }
         } detail: {
             if let conversation = appState.selectedConversation {
                 ChatView(
@@ -175,9 +207,23 @@ struct ContentView: View {
         }
         .onAppear {
             appState.startPolling()
+            if needsSetup {
+                // Small delay so the window is visible before the sheet appears
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    showSetup = true
+                }
+            }
         }
         .onDisappear {
             appState.stopPolling()
+        }
+        .sheet(isPresented: $showSetup) {
+            SetupView(isPresented: $showSetup) {
+                // Re-run startup after setup so conversations load
+                appState.stopPolling()
+                appState.crmConfig = CRMConfig.load()
+                appState.startPolling()
+            }
         }
     }
 }

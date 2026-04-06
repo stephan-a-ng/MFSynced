@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: mfsynced
+      POSTGRES_PASSWORD: mfsynced
+      POSTGRES_DB: mfsynced
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mfsynced"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: web/backend
+    ports:
+      - "8000:8080"
+    environment:
+      DATABASE_URL: postgresql://mfsynced:mfsynced@db:5432/mfsynced
+      JWT_SECRET: dev-secret-change-in-production
+      APP_ENV: development
+      CORS_ORIGINS: "http://localhost:5173,http://localhost:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

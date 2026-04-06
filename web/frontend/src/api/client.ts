@@ -31,4 +31,19 @@ export const api = {
   patch: <T>(path: string, body: unknown) => request<T>(path, { method: 'PATCH', body: JSON.stringify(body) }),
   put: <T>(path: string, body: unknown) => request<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
   delete: (path: string) => request<void>(path, { method: 'DELETE' }),
+  upload: async (file: File): Promise<{ url: string }> => {
+    const token = localStorage.getItem('token');
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch(`${BASE_URL}/upload`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new ApiError(res.status, `${res.status}: ${text}`);
+    }
+    return res.json();
+  },
 };

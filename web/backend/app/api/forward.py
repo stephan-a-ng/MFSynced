@@ -31,10 +31,14 @@ async def forward_thread(
     if body.mode not in ("fyi", "action"):
         raise HTTPException(status_code=400, detail="Mode must be 'fyi' or 'action'")
 
-    # Create forwarded thread
+    # Upsert forwarded thread — re-forwarding same conversation updates existing record
     thread = await conn.fetchrow(
         """INSERT INTO forwarded_threads (phone, agent_id, forwarded_by_user_id, mode, note)
-           VALUES ($1, $2, $3, $4, $5) RETURNING id""",
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (phone, agent_id)
+           DO UPDATE SET mode = $4, note = $5, forwarded_by_user_id = $3,
+                         created_at = now()
+           RETURNING id""",
         body.phone, body.agent_id, user_id, body.mode, body.note,
     )
 
