@@ -54,3 +54,9 @@ class AckRequest(BaseModel):
 class HistoryBatch(BaseModel):
     agent_id: str
     messages: list[InboundMessage]
+
+class AgentForwardRequest(BaseModel):
+    phone: str
+    mode: str = "action"  # "fyi" or "action"
+    note: Optional[str] = None
+    recipient_user_ids: list[str]  # UUID strings

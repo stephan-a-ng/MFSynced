@@ -15,6 +15,7 @@ from app.schemas.agent import (
     OutboundResponse, OutboundCommand,
     AckRequest,
     HistoryBatch,
+    AgentForwardRequest,
 )
 from app.services.agent_service import register_agent
 from app.services.message_service import store_inbound_messages, store_inbound_reactions
@@ -111,6 +112,52 @@ async def sync_history(
         [m.model_dump() for m in body.messages],
     )
     return {"status": "ok"}
+
+
+@router.get("/users")
+async def list_users_for_agent(
+    agent: dict = Depends(require_agent_auth),
+    conn: asyncpg.Connection = Depends(get_db),
+):
+    """List all team members. Used by Mac app forward picker."""
+    rows = await conn.fetch("SELECT id, email, name, photo_url FROM users ORDER BY name")
+    return [{"id": str(r["id"]), "name": r["name"], "email": r["email"], "picture": r["photo_url"]} for r in rows]
+
+
+@router.post("/forward")
+async def forward_thread_from_agent(
+    body: AgentForwardRequest,
+    agent: dict = Depends(require_agent_auth),
+    conn: asyncpg.Connection = Depends(get_db),
+):
+    """Forward a conversation thread to team members. Used by Mac app."""
+    conv = await conn.fetchrow(
+        "SELECT 1 FROM conversations WHERE phone = $1 AND agent_id = $2",
+        body.phone, agent["id"],
+    )
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found — is it synced?")
+
+    if body.mode not in ("fyi", "action"):
+        raise HTTPException(status_code=400, detail="Mode must be 'fyi' or 'action'")
+
+    thread = await conn.fetchrow(
+        """INSERT INTO forwarded_threads (phone, agent_id, forwarded_by_user_id, mode, note)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (phone, agent_id)
+           DO UPDATE SET mode = $4, note = $5, forwarded_by_user_id = $3, created_at = now()
+           RETURNING id""",
+        body.phone, agent["id"], agent["user_id"], body.mode, body.note,
+    )
+
+    for recipient_id in body.recipient_user_ids:
+        await conn.execute(
+            """INSERT INTO forwarded_thread_recipients (thread_id, user_id)
+               VALUES ($1, $2) ON CONFLICT DO NOTHING""",
+            thread["id"], UUID(recipient_id),
+        )
+
+    return {"thread_id": str(thread["id"])}
 
 
 async def _save_upload(file: UploadFile) -> dict:

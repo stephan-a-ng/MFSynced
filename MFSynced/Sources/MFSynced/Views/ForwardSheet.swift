@@ -134,7 +134,7 @@ struct ForwardSheet: View {
     // MARK: - Networking
 
     private func loadTeamMembers() async {
-        guard let url = URL(string: "\(config.apiEndpoint)/v1/users") else {
+        guard let url = URL(string: "\(config.apiEndpoint)/users") else {
             await MainActor.run { isLoading = false }
             return
         }
@@ -158,7 +158,7 @@ struct ForwardSheet: View {
         errorMessage = nil
 
         Task {
-            guard let url = URL(string: "\(config.apiEndpoint)/v1/forward") else { return }
+            guard let url = URL(string: "\(config.apiEndpoint)/forward") else { return }
             var req = URLRequest(url: url)
             req.httpMethod = "POST"
             req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
@@ -166,7 +166,6 @@ struct ForwardSheet: View {
 
             var body: [String: Any] = [
                 "phone": conversation.id,
-                "agent_id": config.agentID,
                 "mode": mode.rawValue,
                 "recipient_user_ids": [recipientID],
             ]
