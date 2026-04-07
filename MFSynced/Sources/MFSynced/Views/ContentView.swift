@@ -196,7 +196,8 @@ struct ContentView: View {
                 ChatView(
                     conversation: conversation,
                     messages: appState.messages,
-                    contact: appState.contactStore.contact(for: conversation.id)
+                    contact: appState.contactStore.contact(for: conversation.id),
+                    contactStore: appState.contactStore
                 )
             } else {
                 Text("Select a conversation")

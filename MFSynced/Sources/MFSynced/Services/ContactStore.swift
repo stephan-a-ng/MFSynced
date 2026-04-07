@@ -50,6 +50,23 @@ final class ContactStore {
         }
     }
 
+    /// Create a new contact in Contacts.app with the given name and phone number, then refresh the cache.
+    func createContact(firstName: String, lastName: String, phoneNumber: String) async throws {
+        let newContact = CNMutableContact()
+        newContact.givenName = firstName
+        newContact.familyName = lastName
+        newContact.phoneNumbers = [CNLabeledValue(
+            label: CNLabelPhoneNumberMobile,
+            value: CNPhoneNumber(stringValue: phoneNumber)
+        )]
+
+        let saveRequest = CNSaveRequest()
+        saveRequest.add(newContact, toContainerWithIdentifier: nil)
+        try store.execute(saveRequest)
+
+        await refresh()
+    }
+
     /// Clear cache and re-fetch all contacts from Contacts.app
     func refresh() async {
         await MainActor.run {

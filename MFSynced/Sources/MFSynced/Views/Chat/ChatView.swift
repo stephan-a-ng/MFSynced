@@ -4,7 +4,13 @@ struct ChatView: View {
     let conversation: Conversation
     let messages: [Message]
     var contact: Contact?
+    var contactStore: ContactStore?
     @Environment(\.colorScheme) private var colorScheme
+
+    @State private var showingContactPopover = false
+    @State private var newFirstName = ""
+    @State private var newLastName = ""
+    @State private var isSaving = false
 
     private var filteredMessages: [Message] {
         messages.filter { !$0.isTapback }
@@ -66,6 +72,17 @@ struct ChatView: View {
         .background(colorScheme == .dark ? Color.black : Color.white)
     }
 
+    /// Whether the conversation ID looks like a phone number (not an email/group chat).
+    private var isPhoneNumber: Bool {
+        let digits = conversation.id.filter { $0.isNumber }
+        return digits.count >= 7
+    }
+
+    /// Whether this contact is unresolved (showing a raw phone number instead of a name).
+    private var isUnresolved: Bool {
+        contact?.fullName == nil
+    }
+
     private var chatHeader: some View {
         VStack(spacing: 4) {
             avatarSmall
@@ -81,12 +98,78 @@ struct ChatView: View {
                 }
             }
 
+            // Show phone number below the name when we have a resolved contact name
+            if isPhoneNumber, !isUnresolved {
+                Text(conversation.id)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Text(conversation.service)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if isPhoneNumber && isUnresolved {
+                newFirstName = ""
+                newLastName = ""
+                showingContactPopover = true
+            }
+        }
+        .popover(isPresented: $showingContactPopover, arrowEdge: .bottom) {
+            contactPopover
+        }
+    }
+
+    private var contactPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Create Contact")
+                .font(.headline)
+
+            Text(conversation.id)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            TextField("First Name", text: $newFirstName)
+                .textFieldStyle(.roundedBorder)
+
+            TextField("Last Name", text: $newLastName)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Button("Cancel") {
+                    showingContactPopover = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Spacer()
+
+                Button("Save") {
+                    guard !newFirstName.isEmpty || !newLastName.isEmpty else { return }
+                    isSaving = true
+                    Task {
+                        do {
+                            try await contactStore?.createContact(
+                                firstName: newFirstName,
+                                lastName: newLastName,
+                                phoneNumber: conversation.id
+                            )
+                        } catch {
+                            print("Failed to create contact: \(error)")
+                        }
+                        isSaving = false
+                        showingContactPopover = false
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled((newFirstName.isEmpty && newLastName.isEmpty) || isSaving)
+            }
+        }
+        .padding()
+        .frame(width: 260)
     }
 
     private var avatarSmall: some View {
