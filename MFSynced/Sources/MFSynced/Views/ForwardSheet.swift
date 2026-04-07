@@ -158,38 +158,58 @@ struct ForwardSheet: View {
         errorMessage = nil
 
         Task {
-            guard let url = URL(string: "\(config.apiEndpoint)/forward") else { return }
-            var req = URLRequest(url: url)
-            req.httpMethod = "POST"
-            req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
             var body: [String: Any] = [
                 "phone": conversation.id,
                 "mode": mode.rawValue,
                 "recipient_user_ids": [recipientID],
             ]
             if !note.isEmpty { body["note"] = note }
-            req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            let bodyData = try? JSONSerialization.data(withJSONObject: body)
 
-            do {
-                let (_, response) = try await URLSession.shared.data(for: req)
-                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-                await MainActor.run {
-                    isForwarding = false
-                    if status == 200 {
-                        didForward = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { onDismiss() }
-                    } else {
-                        errorMessage = "Failed (\(status)). Is this conversation synced?"
-                    }
-                }
-            } catch {
-                await MainActor.run {
-                    isForwarding = false
-                    errorMessage = error.localizedDescription
+            // Forward to primary
+            let primaryOK = await postForward(
+                endpoint: config.apiEndpoint,
+                apiKey: config.apiKey,
+                bodyData: bodyData
+            )
+
+            // Forward to mirror in parallel (fire-and-forget — mirror failures
+            // don't block the user; recipient's inbox on both backends is updated)
+            if config.hasMirror {
+                Task {
+                    _ = await postForward(
+                        endpoint: config.mirrorApiEndpoint,
+                        apiKey: config.mirrorApiKey,
+                        bodyData: bodyData
+                    )
                 }
             }
+
+            await MainActor.run {
+                isForwarding = false
+                if primaryOK {
+                    didForward = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { onDismiss() }
+                } else {
+                    errorMessage = "Forward failed. Is this conversation synced?"
+                }
+            }
+        }
+    }
+
+    /// Returns true if the forward succeeded (HTTP 200).
+    private func postForward(endpoint: String, apiKey: String, bodyData: Data?) async -> Bool {
+        guard let url = URL(string: "\(endpoint)/forward") else { return false }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = bodyData
+        do {
+            let (_, response) = try await URLSession.shared.data(for: req)
+            return (response as? HTTPURLResponse)?.statusCode == 200
+        } catch {
+            return false
         }
     }
 }

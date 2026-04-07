@@ -6,6 +6,11 @@ struct CRMConfig: Codable {
     var apiKey: String = ""
     var pollIntervalSeconds: Double = 5.0
     var syncedPhoneNumbers: Set<String> = []
+    /// Optional second backend that receives all syncs and forwards in parallel
+    var mirrorApiEndpoint: String = ""
+    var mirrorApiKey: String = ""
+
+    var hasMirror: Bool { !mirrorApiEndpoint.isEmpty && !mirrorApiKey.isEmpty }
 
     var agentID: String {
         if let stored = UserDefaults.standard.string(forKey: "mfsynced_agent_id") {

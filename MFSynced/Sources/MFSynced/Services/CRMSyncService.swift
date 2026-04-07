@@ -114,6 +114,17 @@ final class CRMSyncService {
         } catch {
             await MainActor.run { isConnected = false }
         }
+
+        // Mirror: fire-and-forget to second backend (failures don't affect primary)
+        if config.hasMirror,
+           let mirrorURL = URL(string: "\(config.mirrorApiEndpoint)/messages/inbound") {
+            var mirrorReq = URLRequest(url: mirrorURL)
+            mirrorReq.httpMethod = "POST"
+            mirrorReq.setValue("Bearer \(config.mirrorApiKey)", forHTTPHeaderField: "Authorization")
+            mirrorReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            mirrorReq.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            _ = try? await session.data(for: mirrorReq)
+        }
     }
 
     private func pullOutbound() async {
