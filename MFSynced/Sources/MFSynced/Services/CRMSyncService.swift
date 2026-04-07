@@ -23,12 +23,22 @@ private func crmLog(_ message: String) {
     }
 }
 
+struct OutboundResult {
+    let commandID: String
+    let phone: String
+    let text: String
+    let success: Bool
+    let error: String?
+    let timestamp: Date
+}
+
 @Observable
 final class CRMSyncService {
     var isConnected: Bool = false
     var lastSyncTime: Date?
     var pendingInbound: Int = 0
     var pendingOutbound: Int = 0
+    var recentOutboundResults: [OutboundResult] = []
 
     private var config: CRMConfig
     private let syncQueue: SyncQueueDatabase
@@ -146,13 +156,26 @@ final class CRMSyncService {
                 crmLog("[CRM] pullOutbound: sending cmd=\(cmdID) to=\(phone) text_len=\(text.count)")
                 let result = MessageSender.send(text: text, to: phone)
                 let status: String
+                let sendSuccess: Bool
+                var sendError: String? = nil
                 switch result {
                 case .success:
                     status = "delivered"
+                    sendSuccess = true
                     crmLog("[CRM] pullOutbound: delivered cmd=\(cmdID) to=\(phone)")
                 case .failure(let err):
                     status = "failed: \(err.localizedDescription)"
+                    sendSuccess = false
+                    sendError = err.localizedDescription
                     crmLog("[CRM] pullOutbound: FAILED cmd=\(cmdID) to=\(phone) error=\(err.localizedDescription)")
+                }
+                let outboundResult = OutboundResult(
+                    commandID: cmdID, phone: phone, text: text,
+                    success: sendSuccess, error: sendError, timestamp: Date()
+                )
+                await MainActor.run {
+                    recentOutboundResults.append(outboundResult)
+                    if recentOutboundResults.count > 50 { recentOutboundResults.removeFirst() }
                 }
                 await acknowledge(commandID: cmdID, status: status)
                 crmLog("[CRM] pullOutbound: acked cmd=\(cmdID) status=\(status)")

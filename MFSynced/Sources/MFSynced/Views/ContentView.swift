@@ -15,6 +15,7 @@ final class AppState {
     private var lastSeenRowID: Int64 = 0
     private var pollTimer: Timer?
     private var crmService: CRMSyncService?
+    private var controlServer: ControlServer?
     let contactStore = ContactStore()
 
     init() {
@@ -34,6 +35,9 @@ final class AppState {
         if crmConfig.isEnabled {
             crmService?.startPolling()
         }
+
+        controlServer = ControlServer(syncService: crmService!)
+        controlServer?.start()
 
         Task { _ = await NotificationService.requestPermission() }
         Task { _ = await contactStore.requestAccess() }

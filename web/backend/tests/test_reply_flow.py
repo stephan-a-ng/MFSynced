@@ -202,11 +202,60 @@ async def test_inbound_sync_removes_placeholder(db_conn, test_agent):
 
 
 # ---------------------------------------------------------------------------
-# 5. Full flow: reply → refetch → inbound sync → no duplicates
+# 5. Full pipeline via HTTP (simulates Mac app role)
+# ---------------------------------------------------------------------------
+
+async def test_full_pipeline_via_http(
+    client, db_conn, admin_user, chase_user, test_agent,
+):
+    """Full pipeline: reply → agent fetches outbound → agent acks → delivery confirmed."""
+    thread_id, token, agent, raw_key = await _setup_action_thread(
+        client, db_conn, admin_user, chase_user, test_agent,
+    )
+
+    # Reply from portal
+    resp = await client.post(
+        f"/v1/inbox/{thread_id}/reply",
+        json={"text": "Pipeline test"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200
+
+    # Mac app fetches outbound commands (via agent API key)
+    resp = await client.get(
+        "/v1/agent/messages/outbound",
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 200
+    commands = resp.json()["messages"]
+    assert len(commands) == 1
+    assert commands[0]["text"] == "Pipeline test"
+
+    # Mac app acks delivery
+    resp = await client.post(
+        f"/v1/agent/messages/outbound/{commands[0]['id']}/ack",
+        json={"status": "delivered"},
+        headers={"Authorization": f"Bearer {raw_key}"},
+    )
+    assert resp.status_code == 200
+
+    # Verify delivery_status in thread view
+    resp = await client.get(
+        f"/v1/inbox/{thread_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    messages = resp.json()["messages"]
+    portal_msg = [m for m in messages if m["guid"].startswith("outbound:")][0]
+    assert portal_msg["delivery_status"] == "delivered"
+    assert portal_msg["text"] == "Pipeline test"
+
+
+# ---------------------------------------------------------------------------
+# 6. Full flow: reply → refetch → inbound sync → no duplicates
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# 6. Thread detail includes delivery_status for portal-sent messages
+# 7. Thread detail includes delivery_status for portal-sent messages
 # ---------------------------------------------------------------------------
 
 async def test_delivery_status_in_thread_response(
