@@ -22,11 +22,22 @@ cp "$BUILD_DIR/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 # Copy Info.plist
 cp "$SCRIPT_DIR/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 
-echo "==> Code signing (ad-hoc)..."
+SIGN_IDENTITY="MFSynced Dev"
+
+# Check if persistent signing identity exists; fall back to ad-hoc
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$SIGN_IDENTITY"; then
+  echo "==> Code signing (persistent: $SIGN_IDENTITY)..."
+  SIGN_ARG="$SIGN_IDENTITY"
+else
+  echo "==> Code signing (ad-hoc — FDA re-grant needed after each build)..."
+  echo "    TIP: Create a self-signed cert named '$SIGN_IDENTITY' to avoid this."
+  SIGN_ARG="-"
+fi
+
 codesign \
   --force \
   --deep \
-  --sign - \
+  --sign "$SIGN_ARG" \
   --entitlements "$SCRIPT_DIR/entitlements.plist" \
   --identifier "$BUNDLE_ID" \
   "$APP_BUNDLE"
