@@ -115,6 +115,7 @@ export function ThreadViewPage() {
       attachment_mime_type: null,
       attachment_filename: null,
       reactions: [],
+      delivery_status: 'pending',
     };
     setData(prev => prev ? { ...prev, messages: [...prev.messages, optimisticMsg] } : prev);
 
@@ -207,7 +208,7 @@ export function ThreadViewPage() {
             <p className="text-center text-[11px] text-muted-foreground my-3 select-none">{g.label}</p>
             <div className="space-y-0.5">
               {g.messages.map(m => (
-                <MessageBubble key={m.id} message={m} onReact={handleReact} />
+                <MessageBubble key={m.id} message={m} onReact={handleReact} onRetry={handleReply} />
               ))}
             </div>
           </div>

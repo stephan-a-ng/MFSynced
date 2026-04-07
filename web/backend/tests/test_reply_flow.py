@@ -205,6 +205,66 @@ async def test_inbound_sync_removes_placeholder(db_conn, test_agent):
 # 5. Full flow: reply → refetch → inbound sync → no duplicates
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# 6. Thread detail includes delivery_status for portal-sent messages
+# ---------------------------------------------------------------------------
+
+async def test_delivery_status_in_thread_response(
+    client, db_conn, admin_user, chase_user, test_agent,
+):
+    thread_id, token, agent, _ = await _setup_action_thread(
+        client, db_conn, admin_user, chase_user, test_agent,
+    )
+
+    # Reply from portal
+    await client.post(
+        f"/v1/inbox/{thread_id}/reply",
+        json={"text": "Check status"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    # GET thread — delivery_status should be "pending"
+    resp = await client.get(
+        f"/v1/inbox/{thread_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    messages = resp.json()["messages"]
+    portal_msg = [m for m in messages if m["guid"].startswith("outbound:")][0]
+    assert portal_msg["delivery_status"] == "pending"
+
+    # Simulate Mac app picking up the command (marks as 'sent')
+    cmd_id = portal_msg["guid"].split(":", 1)[1]
+    await db_conn.execute(
+        "UPDATE outbound_commands SET status = 'sent' WHERE id = $1", UUID(cmd_id),
+    )
+    resp = await client.get(
+        f"/v1/inbox/{thread_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    portal_msg = [m for m in resp.json()["messages"] if m["guid"].startswith("outbound:")][0]
+    assert portal_msg["delivery_status"] == "sent"
+
+    # Simulate Mac app acking delivery
+    await db_conn.execute(
+        "UPDATE outbound_commands SET status = 'delivered' WHERE id = $1", UUID(cmd_id),
+    )
+    resp = await client.get(
+        f"/v1/inbox/{thread_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    portal_msg = [m for m in resp.json()["messages"] if m["guid"].startswith("outbound:")][0]
+    assert portal_msg["delivery_status"] == "delivered"
+
+    # Non-portal messages should have null delivery_status
+    for m in resp.json()["messages"]:
+        if not m["guid"].startswith("outbound:"):
+            assert m["delivery_status"] is None
+
+
+# ---------------------------------------------------------------------------
+# 7. Full flow: reply → refetch → inbound sync → no duplicates
+# ---------------------------------------------------------------------------
+
 async def test_full_reply_then_sync_no_duplicates(
     client, db_conn, admin_user, chase_user, test_agent,
 ):

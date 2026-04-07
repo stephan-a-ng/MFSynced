@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Play, Pause } from 'lucide-react';
+import { Play, Pause, RotateCw } from 'lucide-react';
 import type { Message } from '../api/conversations';
 
 const REACTION_EMOJI: Record<string, string> = {
@@ -16,10 +16,13 @@ const REACTION_TYPES = ['love', 'like', 'dislike', 'laugh', 'emphasize', 'questi
 interface Props {
   message: Message;
   onReact?: (messageGuid: string, reactionType: string) => void;
+  onRetry?: (text: string) => void;
 }
 
-export function MessageBubble({ message, onReact }: Props) {
-  const time = new Date(message.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+// 60s timeout: if pending/sent for longer than this, treat as failed
+const DELIVERY_TIMEOUT_MS = 60_000;
+
+export function MessageBubble({ message, onReact, onRetry }: Props) {
   const [showReactionPicker, setShowReactionPicker] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
 
@@ -43,6 +46,22 @@ export function MessageBubble({ message, onReact }: Props) {
   const hasAttachment = !!message.attachment_type;
   const hasText = !!message.text;
   const hasReactions = message.reactions.length > 0;
+
+  // Delivery status for portal-sent messages
+  const isPortalSent = message.guid.startsWith('outbound:') || message.guid.startsWith('pending-');
+  let deliveryState: 'sending' | 'delivered' | 'failed' | null = null;
+  if (isPortalSent) {
+    const status = message.delivery_status;
+    if (status === 'delivered') {
+      deliveryState = 'delivered';
+    } else if (status?.startsWith('failed')) {
+      deliveryState = 'failed';
+    } else {
+      // pending or sent — check for timeout
+      const age = Date.now() - new Date(message.timestamp).getTime();
+      deliveryState = age > DELIVERY_TIMEOUT_MS ? 'failed' : 'sending';
+    }
+  }
 
   return (
     <div className={`flex ${fromMe ? 'justify-end' : 'justify-start'} group`}>
@@ -111,10 +130,37 @@ export function MessageBubble({ message, onReact }: Props) {
           </div>
         )}
 
-        {/* Timestamp */}
-        <p className={`text-xs text-muted-foreground mt-1 ${fromMe ? 'text-right' : 'text-left'}`}>
-          {time}
-        </p>
+        {/* Delivery status dot for portal-sent messages */}
+        {deliveryState && (
+          <div className={`flex items-center gap-1 mt-0.5 ${fromMe ? 'justify-end' : 'justify-start'}`}>
+            <span
+              className={`inline-block w-2 h-2 rounded-full ${
+                deliveryState === 'delivered'
+                  ? 'bg-green-500'
+                  : deliveryState === 'failed'
+                  ? 'bg-red-500'
+                  : 'bg-yellow-500 animate-pulse'
+              }`}
+              title={
+                deliveryState === 'delivered'
+                  ? 'Delivered'
+                  : deliveryState === 'failed'
+                  ? 'Failed to deliver'
+                  : 'Sending...'
+              }
+            />
+            {deliveryState === 'failed' && onRetry && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onRetry(message.text); }}
+                className="inline-flex items-center gap-0.5 text-[10px] text-red-500 hover:text-red-400 transition-colors"
+                title="Retry sending"
+              >
+                <RotateCw size={10} />
+                Retry
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

@@ -94,6 +94,24 @@ async def get_thread(
     logger.info("get_thread thread_id=%s phone=%s agent_id=%s message_count=%d",
                 thread_id, row["phone"], row["agent_id"], len(messages))
 
+    # Look up delivery statuses for portal-sent messages (outbound:* guids)
+    outbound_cmd_ids = []
+    for m in messages:
+        if m["guid"].startswith("outbound:"):
+            try:
+                outbound_cmd_ids.append(UUID(m["guid"].split(":", 1)[1]))
+            except (ValueError, IndexError):
+                pass
+
+    delivery_statuses: dict[str, str] = {}
+    if outbound_cmd_ids:
+        status_rows = await conn.fetch(
+            "SELECT id, status FROM outbound_commands WHERE id = ANY($1)",
+            outbound_cmd_ids,
+        )
+        for sr in status_rows:
+            delivery_statuses[f"outbound:{sr['id']}"] = sr["status"]
+
     return ThreadDetailResponse(
         thread=thread,
         messages=[
@@ -101,6 +119,7 @@ async def get_thread(
                 **{k: m[k] for k in ("id", "guid", "phone", "text", "timestamp", "is_from_me", "service",
                                       "attachment_type", "attachment_url", "attachment_mime_type", "attachment_filename")},
                 reactions=[ReactionResponse(**r) for r in m["reactions"]],
+                delivery_status=delivery_statuses.get(m["guid"]),
             )
             for m in messages
         ],

@@ -26,6 +26,7 @@ export interface Message {
   attachment_mime_type: string | null;
   attachment_filename: string | null;
   reactions: Reaction[];
+  delivery_status: string | null;
 }
 
 export const conversationsApi = {

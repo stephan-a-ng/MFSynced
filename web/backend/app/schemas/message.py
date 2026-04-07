@@ -20,6 +20,7 @@ class MessageResponse(BaseModel):
     attachment_mime_type: Optional[str] = None
     attachment_filename: Optional[str] = None
     reactions: list[ReactionResponse] = []
+    delivery_status: Optional[str] = None  # pending | sent | delivered | failed
 
 class ConversationResponse(BaseModel):
     phone: str
