@@ -131,13 +131,6 @@ async def forward_thread_from_agent(
     conn: asyncpg.Connection = Depends(get_db),
 ):
     """Forward a conversation thread to team members. Used by Mac app."""
-    conv = await conn.fetchrow(
-        "SELECT 1 FROM conversations WHERE phone = $1 AND agent_id = $2",
-        body.phone, agent["id"],
-    )
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found — is it synced?")
-
     if body.mode not in ("fyi", "action"):
         raise HTTPException(status_code=400, detail="Mode must be 'fyi' or 'action'")
 
