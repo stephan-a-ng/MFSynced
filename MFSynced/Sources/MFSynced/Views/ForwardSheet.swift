@@ -19,125 +19,116 @@ struct ForwardSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            // Header
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Forward to Team")
-                    .font(.headline)
-                Text(contactName ?? conversation.title)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-
+            headerSection
             Divider()
-
-            // Mode
-            VStack(alignment: .leading, spacing: 6) {
-                Text("TYPE")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fontWeight(.semibold)
-                Picker("Mode", selection: $mode) {
-                    Text("Action needed").tag(ForwardMode.action)
-                    Text("FYI only").tag(ForwardMode.fyi)
-                }
-                .pickerStyle(.segmented)
-            }
-
-            // Team member list
-            VStack(alignment: .leading, spacing: 6) {
-                Text("SEND TO")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fontWeight(.semibold)
-
-                if isLoading {
-                    HStack { Spacer(); ProgressView(); Spacer() }
-                        .frame(height: 60)
-                } else if teamMembers.isEmpty {
-                    Text("No team members found")
-                        .foregroundStyle(.secondary)
-                        .font(.subheadline)
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 8)
-                } else {
-                    VStack(spacing: 2) {
-                        ForEach(teamMembers) { member in
-                            HStack(spacing: 8) {
-                                Circle()
-                                    .fill(Color.accentColor.opacity(0.15))
-                                    .frame(width: 30, height: 30)
-                                    .overlay(
-                                        Text(String(member.name.prefix(1)).uppercased())
-                                            .font(.caption.bold())
-                                            .foregroundStyle(.accentColor)
-                                    )
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(member.name).font(.subheadline)
-                                    Text(member.email).font(.caption).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                if selectedMemberID == member.id {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundStyle(.accentColor)
-                                        .font(.subheadline)
-                                }
-                            }
-                            .padding(.vertical, 5)
-                            .padding(.horizontal, 6)
-                            .background(
-                                selectedMemberID == member.id
-                                    ? Color.accentColor.opacity(0.08)
-                                    : Color.clear
-                            )
-                            .cornerRadius(6)
-                            .contentShape(Rectangle())
-                            .onTapGesture { selectedMemberID = member.id }
-                        }
-                    }
-                }
-            }
-
-            // Note
-            VStack(alignment: .leading, spacing: 6) {
-                Text("NOTE (OPTIONAL)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fontWeight(.semibold)
-                TextField("Add a note...", text: $note, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .lineLimit(1...3)
-            }
-
+            modeSection
+            recipientSection
+            noteSection
             if let error = errorMessage {
                 Text(error)
                     .font(.caption)
                     .foregroundStyle(.red)
             }
-
-            // Forward button
-            Button(action: doForward) {
-                Group {
-                    if isForwarding {
-                        HStack(spacing: 6) {
-                            ProgressView().scaleEffect(0.75)
-                            Text("Forwarding...")
-                        }
-                    } else if didForward {
-                        Label("Forwarded", systemImage: "checkmark")
-                    } else {
-                        Text("Forward")
-                    }
-                }
-                .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(selectedMemberID == nil || isForwarding || didForward)
+            forwardButton
         }
         .padding(16)
         .frame(width: 300)
         .task { await loadTeamMembers() }
+    }
+
+    // MARK: - Subviews
+
+    private var headerSection: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Forward to Team")
+                .font(.headline)
+            Text(contactName ?? conversation.title)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private var modeSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("TYPE")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fontWeight(.semibold)
+            Picker("Mode", selection: $mode) {
+                Text("Action needed").tag(ForwardMode.action)
+                Text("FYI only").tag(ForwardMode.fyi)
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private var recipientSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("SEND TO")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fontWeight(.semibold)
+            recipientList
+        }
+    }
+
+    @ViewBuilder
+    private var recipientList: some View {
+        if isLoading {
+            HStack { Spacer(); ProgressView(); Spacer() }
+                .frame(height: 60)
+        } else if teamMembers.isEmpty {
+            Text("No team members found")
+                .foregroundStyle(.secondary)
+                .font(.subheadline)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.vertical, 8)
+        } else {
+            VStack(spacing: 2) {
+                ForEach(teamMembers) { member in
+                    MemberRow(member: member, isSelected: selectedMemberID == member.id) {
+                        selectedMemberID = member.id
+                    }
+                }
+            }
+        }
+    }
+
+    private var noteSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("NOTE (OPTIONAL)")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fontWeight(.semibold)
+            TextField("Add a note...", text: $note, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...3)
+        }
+    }
+
+    private var forwardButton: some View {
+        Button(action: doForward) {
+            forwardButtonLabel
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .disabled(selectedMemberID == nil || isForwarding || didForward)
+    }
+
+    @ViewBuilder
+    private var forwardButtonLabel: some View {
+        if isForwarding {
+            HStack(spacing: 6) {
+                ProgressView().scaleEffect(0.75)
+                Text("Forwarding...")
+            }
+        } else if didForward {
+            Label("Forwarded", systemImage: "checkmark")
+        } else {
+            Text("Forward")
+        }
     }
 
     // MARK: - Networking
@@ -201,6 +192,43 @@ struct ForwardSheet: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Member Row
+
+private struct MemberRow: View {
+    let member: TeamMember
+    let isSelected: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(Color.accentColor.opacity(0.15))
+                .frame(width: 30, height: 30)
+                .overlay(
+                    Text(String(member.name.prefix(1)).uppercased())
+                        .font(.caption.bold())
+                        .foregroundStyle(Color.accentColor)
+                )
+            VStack(alignment: .leading, spacing: 1) {
+                Text(member.name).font(.subheadline)
+                Text(member.email).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if isSelected {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(Color.accentColor)
+                    .font(.subheadline)
+            }
+        }
+        .padding(.vertical, 5)
+        .padding(.horizontal, 6)
+        .background(isSelected ? Color.accentColor.opacity(0.08) : Color.clear)
+        .cornerRadius(6)
+        .contentShape(Rectangle())
+        .onTapGesture { onTap() }
     }
 }
 

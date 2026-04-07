@@ -187,7 +187,7 @@ private struct ConversationRow: View {
                     } label: {
                         Image(systemName: "arrowshape.turn.up.right.fill")
                             .font(.system(size: 12))
-                            .foregroundStyle(.accentColor.opacity(0.8))
+                            .foregroundStyle(Color.accentColor.opacity(0.8))
                             .frame(width: 26, height: 20)
                             .contentShape(Rectangle())
                     }
