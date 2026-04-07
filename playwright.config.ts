@@ -18,5 +18,9 @@ export default defineConfig({
       name: 'staging',
       testMatch: /staging-auth\.spec\.ts/,
     },
+    {
+      name: 'sync-fyi',
+      testMatch: /sync-and-fyi\.spec\.ts/,
+    },
   ],
 });

@@ -134,6 +134,15 @@ async def forward_thread_from_agent(
     if body.mode not in ("fyi", "action"):
         raise HTTPException(status_code=400, detail="Mode must be 'fyi' or 'action'")
 
+    # Ensure conversation row exists to satisfy the FK constraint.
+    # Messages may not have synced yet when the user first taps Forward.
+    await conn.execute(
+        """INSERT INTO conversations (phone, agent_id)
+           VALUES ($1, $2)
+           ON CONFLICT (phone, agent_id) DO NOTHING""",
+        body.phone, agent["id"],
+    )
+
     thread = await conn.fetchrow(
         """INSERT INTO forwarded_threads (phone, agent_id, forwarded_by_user_id, mode, note)
            VALUES ($1, $2, $3, $4, $5)
