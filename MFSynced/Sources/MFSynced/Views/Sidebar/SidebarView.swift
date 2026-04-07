@@ -5,6 +5,7 @@ struct SidebarView: View {
     @State private var searchText: String = ""
 
     @State private var isSyncingContacts = false
+    @State private var forwardingConversation: Conversation?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -159,6 +160,14 @@ struct SidebarView: View {
                         appState.selectConversation(conversation)
                     }
                     .contextMenu {
+                        if appState.crmConfig.isEnabled {
+                            Button {
+                                forwardingConversation = conversation
+                            } label: {
+                                Label("Forward to Team...", systemImage: "arrowshape.turn.up.right")
+                            }
+                            Divider()
+                        }
                         Button(conversation.isCRMSynced ? "Disable CRM Sync" : "Enable CRM Sync") {
                             appState.toggleCRMSync(for: conversation)
                         }
@@ -173,6 +182,15 @@ struct SidebarView: View {
                 }
             }
             .padding(.horizontal, 4)
+        }
+        .sheet(item: $forwardingConversation) { conv in
+            let contact = appState.contactStore.contact(for: conv.id)
+            ForwardSheet(
+                conversation: conv,
+                config: appState.crmConfig,
+                contactName: contact.fullName,
+                onDismiss: { forwardingConversation = nil }
+            )
         }
     }
 }
