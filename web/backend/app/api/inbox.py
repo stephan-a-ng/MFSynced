@@ -109,6 +109,12 @@ async def archive_thread(
     conn: asyncpg.Connection = Depends(get_db),
 ):
     """Archive a thread for the current user."""
+    recipient = await conn.fetchrow(
+        "SELECT 1 FROM forwarded_thread_recipients WHERE thread_id = $1 AND user_id = $2",
+        thread_id, user_id,
+    )
+    if recipient is None:
+        raise HTTPException(status_code=403, detail="Not a recipient")
     await conn.execute(
         """UPDATE forwarded_thread_recipients
            SET is_archived = true

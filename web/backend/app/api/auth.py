@@ -158,6 +158,31 @@ async def dev_marco_login(
     jwt_token = create_user_token(user["id"], user["role"])
     return TokenResponse(access_token=jwt_token)
 
+@router.post("/dev-chase-login", response_model=TokenResponse)
+async def dev_chase_login(
+    conn: asyncpg.Connection = Depends(get_db),
+) -> TokenResponse:
+    """Dev-only login as chase@moonfive.tech."""
+    if settings.APP_ENV not in ("staging", "development"):
+        raise HTTPException(status_code=404, detail="Not found")
+
+    email = "chase@moonfive.tech"
+    google_id = "dev-chase"
+    name = "Chase"
+    role = "member"
+
+    user = await conn.fetchrow("SELECT * FROM users WHERE google_id = $1", google_id)
+    if user is None:
+        user = await conn.fetchrow(
+            """INSERT INTO users (google_id, email, name, role)
+               VALUES ($1, $2, $3, $4) RETURNING *""",
+            google_id, email, name, role,
+        )
+
+    jwt_token = create_user_token(user["id"], user["role"])
+    return TokenResponse(access_token=jwt_token)
+
+
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
     user_id: UUID = Depends(get_current_user_id),

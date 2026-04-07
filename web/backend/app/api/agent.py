@@ -152,6 +152,11 @@ async def forward_thread_from_agent(
         body.phone, agent["id"], agent["user_id"], body.mode, body.note,
     )
 
+    # Replace recipients — delete stale entries so only the current list is active
+    await conn.execute(
+        "DELETE FROM forwarded_thread_recipients WHERE thread_id = $1",
+        thread["id"],
+    )
     for recipient_id in body.recipient_user_ids:
         await conn.execute(
             """INSERT INTO forwarded_thread_recipients (thread_id, user_id)

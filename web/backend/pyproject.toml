@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "ruff"]
+dev = ["pytest", "pytest-asyncio", "anyio[trio]", "ruff"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
