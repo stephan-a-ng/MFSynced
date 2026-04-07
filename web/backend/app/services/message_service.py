@@ -42,6 +42,14 @@ async def store_inbound_messages(
                 msg.get("attachment_filename"),
             )
 
+            # Clean up outbound placeholder when the real sent message syncs back
+            if msg.get("is_from_me", False):
+                await conn.execute(
+                    """DELETE FROM messages
+                       WHERE guid LIKE 'outbound:%' AND agent_id = $1 AND phone = $2 AND text = $3""",
+                    agent_id, phone, msg.get("text", ""),
+                )
+
             confirmed.append(guid)
 
             # Upsert conversation (update contact_name if provided)
@@ -131,6 +139,9 @@ async def fetch_messages_with_reactions(
            ORDER BY sub.timestamp ASC""",
         phone, agent_id, limit, offset,
     )
+
+    logger.info("fetch_messages phone=%s agent_id=%s limit=%d offset=%d returned=%d",
+                phone, agent_id, limit, offset, len(rows))
 
     if not rows:
         return []

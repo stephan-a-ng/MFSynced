@@ -143,15 +143,23 @@ final class CRMSyncService {
                 guard let cmdID = msg["id"] as? String,
                       let phone = msg["phone"] as? String,
                       let text = msg["text"] as? String else { continue }
+                crmLog("[CRM] pullOutbound: sending cmd=\(cmdID) to=\(phone) text_len=\(text.count)")
                 let result = MessageSender.send(text: text, to: phone)
                 let status: String
                 switch result {
-                case .success: status = "delivered"
-                case .failure(let err): status = "failed: \(err.localizedDescription)"
+                case .success:
+                    status = "delivered"
+                    crmLog("[CRM] pullOutbound: delivered cmd=\(cmdID) to=\(phone)")
+                case .failure(let err):
+                    status = "failed: \(err.localizedDescription)"
+                    crmLog("[CRM] pullOutbound: FAILED cmd=\(cmdID) to=\(phone) error=\(err.localizedDescription)")
                 }
                 await acknowledge(commandID: cmdID, status: status)
+                crmLog("[CRM] pullOutbound: acked cmd=\(cmdID) status=\(status)")
             }
-        } catch { }
+        } catch {
+            crmLog("[CRM] pullOutbound: network error: \(error)")
+        }
     }
 
     private func acknowledge(commandID: String, status: String) async {

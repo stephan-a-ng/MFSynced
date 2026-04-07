@@ -47,6 +47,8 @@ async def inbound_messages(
         conn, agent["id"],
         [m.model_dump() for m in body.messages],
     )
+    logger.info("inbound_messages agent_id=%s batch_size=%d confirmed=%d",
+                agent["id"], len(body.messages), len(confirmed))
     return InboundResponse(confirmed=confirmed)
 
 
@@ -80,6 +82,7 @@ async def outbound_messages(
 ) -> OutboundResponse:
     """Return pending outbound commands for the Mac app to send."""
     commands = await fetch_pending_commands(conn, agent["id"])
+    logger.info("outbound_messages agent_id=%s command_count=%d", agent["id"], len(commands))
     return OutboundResponse(
         messages=[OutboundCommand(**{k: c[k] for k in ("id", "phone", "text", "attachment_type", "attachment_url")}) for c in commands]
     )
@@ -94,6 +97,8 @@ async def ack_outbound(
 ):
     """Acknowledge delivery of an outbound command."""
     found = await acknowledge_command(conn, command_id, agent["id"], body.status)
+    logger.info("ack_outbound command_id=%s agent_id=%s status=%s found=%s",
+                command_id, agent["id"], body.status, found)
     if not found:
         raise HTTPException(status_code=404, detail="Command not found")
     return {"status": "ok"}

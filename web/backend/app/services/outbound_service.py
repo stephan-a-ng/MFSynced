@@ -1,7 +1,10 @@
+import logging
 from uuid import UUID
 from datetime import datetime, timezone
 
 import asyncpg
+
+logger = logging.getLogger(__name__)
 
 
 async def fetch_pending_commands(
@@ -16,6 +19,7 @@ async def fetch_pending_commands(
            RETURNING id, phone, text, attachment_type, attachment_url""",
         agent_id,
     )
+    logger.info("fetch_pending_commands agent_id=%s count=%d", agent_id, len(rows))
     return [dict(r) for r in rows]
 
 
@@ -32,4 +36,7 @@ async def acknowledge_command(
            WHERE id = $3 AND agent_id = $4""",
         status, datetime.now(timezone.utc), command_id, agent_id,
     )
-    return result != "UPDATE 0"
+    found = result != "UPDATE 0"
+    logger.info("acknowledge_command command_id=%s agent_id=%s status=%s found=%s",
+                command_id, agent_id, status, found)
+    return found

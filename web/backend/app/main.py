@@ -40,6 +40,27 @@ app.add_middleware(
 )
 
 @app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    import time
+    if request.url.path in ("/health", "/openapi.json") or request.url.path.startswith("/uploads/"):
+        return await call_next(request)
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration_ms = (time.perf_counter() - start) * 1000
+    caller = "anon"
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        try:
+            from jose import jwt as _jwt
+            payload = _jwt.decode(auth[7:], settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+            caller = f"user:{payload.get('sub', '?')}"
+        except Exception:
+            caller = "agent-key"
+    logger.info("HTTP %s %s -> %s (%.0fms) caller=%s",
+                request.method, request.url.path, response.status_code, duration_ms, caller)
+    return response
+
+@app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"

@@ -75,6 +75,22 @@ export function ThreadViewPage() {
       setLoading(false);
       inboxApi.markRead(threadId);
     }).catch(() => setLoading(false));
+
+    // Poll every 10s for new messages / synced-back replies
+    const interval = setInterval(() => {
+      inboxApi.get(threadId).then(updated => {
+        setData(prev => {
+          if (!prev) return updated;
+          const realGuids = new Set(updated.messages.map(m => m.guid));
+          const pending = prev.messages.filter(
+            m => m.guid.startsWith('pending-') && !realGuids.has(m.guid)
+          );
+          return { ...updated, messages: [...updated.messages, ...pending] };
+        });
+      }).catch(() => {});
+    }, 10_000);
+
+    return () => clearInterval(interval);
   }, [threadId]);
 
   useEffect(() => {
@@ -104,14 +120,9 @@ export function ThreadViewPage() {
 
     await inboxApi.reply(threadId, text, attachmentType, attachmentUrl);
 
-    // Refetch and preserve any optimistic messages not yet in the DB
+    // Backend now inserts into messages immediately — refetch gets the real row
     const updated = await inboxApi.get(threadId);
-    setData(prev => {
-      if (!prev) return updated;
-      const realGuids = new Set(updated.messages.map(m => m.guid));
-      const pending = prev.messages.filter(m => m.guid.startsWith('pending-') && !realGuids.has(m.guid));
-      return { ...updated, messages: [...updated.messages, ...pending] };
-    });
+    setData(updated);
   };
 
   const handleArchive = async () => {
