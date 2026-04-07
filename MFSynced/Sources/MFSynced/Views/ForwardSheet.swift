@@ -18,24 +18,15 @@ struct ForwardSheet: View {
     enum ForwardMode: String { case fyi, action }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             // Header
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Forward Thread")
-                        .font(.headline)
-                    Text(contactName ?? conversation.title)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-                Button { onDismiss() } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                        .font(.title3)
-                }
-                .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Forward to Team")
+                    .font(.headline)
+                Text(contactName ?? conversation.title)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
 
             Divider()
@@ -62,20 +53,20 @@ struct ForwardSheet: View {
 
                 if isLoading {
                     HStack { Spacer(); ProgressView(); Spacer() }
-                        .frame(height: 80)
+                        .frame(height: 60)
                 } else if teamMembers.isEmpty {
                     Text("No team members found")
                         .foregroundStyle(.secondary)
                         .font(.subheadline)
                         .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.vertical, 12)
+                        .padding(.vertical, 8)
                 } else {
-                    VStack(spacing: 0) {
+                    VStack(spacing: 2) {
                         ForEach(teamMembers) { member in
-                            HStack(spacing: 10) {
+                            HStack(spacing: 8) {
                                 Circle()
                                     .fill(Color.accentColor.opacity(0.15))
-                                    .frame(width: 34, height: 34)
+                                    .frame(width: 30, height: 30)
                                     .overlay(
                                         Text(String(member.name.prefix(1)).uppercased())
                                             .font(.caption.bold())
@@ -89,10 +80,11 @@ struct ForwardSheet: View {
                                 if selectedMemberID == member.id {
                                     Image(systemName: "checkmark.circle.fill")
                                         .foregroundStyle(.accentColor)
+                                        .font(.subheadline)
                                 }
                             }
-                            .padding(.vertical, 6)
-                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .padding(.horizontal, 6)
                             .background(
                                 selectedMemberID == member.id
                                     ? Color.accentColor.opacity(0.08)
@@ -123,8 +115,6 @@ struct ForwardSheet: View {
                     .foregroundStyle(.red)
             }
 
-            Spacer(minLength: 0)
-
             // Forward button
             Button(action: doForward) {
                 Group {
@@ -145,8 +135,8 @@ struct ForwardSheet: View {
             .controlSize(.large)
             .disabled(selectedMemberID == nil || isForwarding || didForward)
         }
-        .padding(20)
-        .frame(width: 340, height: 460)
+        .padding(16)
+        .frame(width: 300)
         .task { await loadTeamMembers() }
     }
 
@@ -199,9 +189,9 @@ struct ForwardSheet: View {
                     isForwarding = false
                     if status == 200 {
                         didForward = true
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { onDismiss() }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { onDismiss() }
                     } else {
-                        errorMessage = "Server returned \(status). Check that this conversation is synced."
+                        errorMessage = "Failed (\(status)). Is this conversation synced?"
                     }
                 }
             } catch {

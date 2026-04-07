@@ -3,9 +3,7 @@ import SwiftUI
 struct SidebarView: View {
     @Bindable var appState: AppState
     @State private var searchText: String = ""
-
     @State private var isSyncingContacts = false
-    @State private var forwardingConversation: Conversation?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -119,78 +117,111 @@ struct SidebarView: View {
         ScrollView {
             LazyVStack(spacing: 0) {
                 ForEach(appState.conversations) { conversation in
-                    let isSelected = appState.selectedConversation?.id == conversation.id
-
-                    HStack(spacing: 10) {
-                        let contact = appState.contactStore.contact(for: conversation.id)
-
-                        AvatarView(
-                            conversation: conversation,
-                            isSelected: isSelected,
-                            contact: contact
-                        )
-
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(contact.fullName ?? conversation.title)
-                                .font(.system(size: 13, weight: .semibold))
-                                .lineLimit(1)
-
-                            if let lastMsg = conversation.lastMessage {
-                                Text(lastMsg.displayText ?? "")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                        }
-
-                        Spacer()
-
-                        if let lastMsg = conversation.lastMessage {
-                            Text(lastMsg.formattedTime)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(isSelected ? Color.accentColor.opacity(0.2) : Color.clear)
-                    .cornerRadius(8)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        appState.selectConversation(conversation)
-                    }
-                    .contextMenu {
-                        if appState.crmConfig.isEnabled {
-                            Button {
-                                forwardingConversation = conversation
-                            } label: {
-                                Label("Forward to Team...", systemImage: "arrowshape.turn.up.right")
-                            }
-                            Divider()
-                        }
-                        Button(conversation.isCRMSynced ? "Disable CRM Sync" : "Enable CRM Sync") {
-                            appState.toggleCRMSync(for: conversation)
-                        }
-                        if conversation.isCRMSynced {
-                            Button("Sync History to CRM") {
-                                Task {
-                                    await appState.syncHistoryToCRM(for: conversation)
-                                }
-                            }
-                        }
-                    }
+                    ConversationRow(
+                        conversation: conversation,
+                        contact: appState.contactStore.contact(for: conversation.id),
+                        isSelected: appState.selectedConversation?.id == conversation.id,
+                        crmConfig: appState.crmConfig,
+                        onSelect: { appState.selectConversation(conversation) },
+                        onToggleCRMSync: { appState.toggleCRMSync(for: conversation) },
+                        onSyncHistory: { Task { await appState.syncHistoryToCRM(for: conversation) } }
+                    )
                 }
             }
             .padding(.horizontal, 4)
         }
-        .sheet(item: $forwardingConversation) { conv in
-            let contact = appState.contactStore.contact(for: conv.id)
-            ForwardSheet(
-                conversation: conv,
-                config: appState.crmConfig,
-                contactName: contact.fullName,
-                onDismiss: { forwardingConversation = nil }
+    }
+}
+
+// MARK: - Conversation Row
+
+private struct ConversationRow: View {
+    let conversation: Conversation
+    let contact: Contact
+    let isSelected: Bool
+    let crmConfig: CRMConfig
+    let onSelect: () -> Void
+    let onToggleCRMSync: () -> Void
+    let onSyncHistory: () -> Void
+
+    @State private var isHovered = false
+    @State private var showForwardPopover = false
+
+    private var canForward: Bool { !crmConfig.apiEndpoint.isEmpty }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            AvatarView(
+                conversation: conversation,
+                isSelected: isSelected,
+                contact: contact
             )
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(contact.fullName ?? conversation.title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+
+                if let lastMsg = conversation.lastMessage {
+                    Text(lastMsg.displayText ?? "")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            // Right side: forward button on hover, timestamp otherwise
+            ZStack {
+                if let lastMsg = conversation.lastMessage {
+                    Text(lastMsg.formattedTime)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .opacity((isHovered || showForwardPopover) && canForward ? 0 : 1)
+                }
+
+                if canForward {
+                    Button {
+                        showForwardPopover = true
+                    } label: {
+                        Image(systemName: "arrowshape.turn.up.right.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.accentColor.opacity(0.8))
+                            .frame(width: 26, height: 20)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Forward to team")
+                    .opacity((isHovered || showForwardPopover) ? 1 : 0)
+                    .popover(isPresented: $showForwardPopover, arrowEdge: .trailing) {
+                        ForwardSheet(
+                            conversation: conversation,
+                            config: crmConfig,
+                            contactName: contact.fullName,
+                            onDismiss: { showForwardPopover = false }
+                        )
+                    }
+                }
+            }
+            .frame(width: 44, alignment: .trailing)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(isSelected ? Color.accentColor.opacity(0.2) : Color.clear)
+        .cornerRadius(8)
+        .contentShape(Rectangle())
+        .onHover { isHovered = $0 }
+        .onTapGesture { onSelect() }
+        .contextMenu {
+            Button(conversation.isCRMSynced ? "Disable CRM Sync" : "Enable CRM Sync") {
+                onToggleCRMSync()
+            }
+            if conversation.isCRMSynced {
+                Button("Sync History to CRM") {
+                    onSyncHistory()
+                }
+            }
         }
     }
 }
