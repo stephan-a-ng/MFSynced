@@ -153,35 +153,35 @@ struct ForwardSheet: View {
     }
 
     private func doForward() {
-        guard let recipientID = selectedMemberID else { return }
+        guard let recipientID = selectedMemberID,
+              let recipientEmail = teamMembers.first(where: { $0.id == recipientID })?.email
+        else { return }
         isForwarding = true
         errorMessage = nil
 
         Task {
-            var body: [String: Any] = [
-                "phone": conversation.id,
-                "mode": mode.rawValue,
-                "recipient_user_ids": [recipientID],
-            ]
-            if !note.isEmpty { body["note"] = note }
-            let bodyData = try? JSONSerialization.data(withJSONObject: body)
-
-            // Forward to primary
+            // Forward to primary using the already-loaded recipient ID
             let primaryOK = await postForward(
                 endpoint: config.apiEndpoint,
                 apiKey: config.apiKey,
-                bodyData: bodyData
+                recipientID: recipientID
             )
 
-            // Forward to mirror in parallel (fire-and-forget — mirror failures
-            // don't block the user; recipient's inbox on both backends is updated)
+            // Mirror: resolve the recipient's UUID on the mirror backend by email
+            // (each backend has different UUIDs for the same person)
             if config.hasMirror {
                 Task {
-                    _ = await postForward(
+                    if let mirrorRecipientID = await resolveUserID(
+                        email: recipientEmail,
                         endpoint: config.mirrorApiEndpoint,
-                        apiKey: config.mirrorApiKey,
-                        bodyData: bodyData
-                    )
+                        apiKey: config.mirrorApiKey
+                    ) {
+                        _ = await postForward(
+                            endpoint: config.mirrorApiEndpoint,
+                            apiKey: config.mirrorApiKey,
+                            recipientID: mirrorRecipientID
+                        )
+                    }
                 }
             }
 
@@ -197,14 +197,31 @@ struct ForwardSheet: View {
         }
     }
 
-    /// Returns true if the forward succeeded (HTTP 200).
-    private func postForward(endpoint: String, apiKey: String, bodyData: Data?) async -> Bool {
+    /// Looks up a user's ID by email on a given backend.
+    private func resolveUserID(email: String, endpoint: String, apiKey: String) async -> String? {
+        guard let url = URL(string: "\(endpoint)/users") else { return nil }
+        var req = URLRequest(url: url)
+        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let users = try? JSONDecoder().decode([UserDTO].self, from: data)
+        else { return nil }
+        return users.first(where: { $0.email == email })?.id
+    }
+
+    /// POSTs a forward request. Returns true on HTTP 200.
+    private func postForward(endpoint: String, apiKey: String, recipientID: String) async -> Bool {
         guard let url = URL(string: "\(endpoint)/forward") else { return false }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = bodyData
+        var body: [String: Any] = [
+            "phone": conversation.id,
+            "mode": mode.rawValue,
+            "recipient_user_ids": [recipientID],
+        ]
+        if !note.isEmpty { body["note"] = note }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
         do {
             let (_, response) = try await URLSession.shared.data(for: req)
             return (response as? HTTPURLResponse)?.statusCode == 200
