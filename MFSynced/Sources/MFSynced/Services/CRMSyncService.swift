@@ -64,7 +64,7 @@ final class CRMSyncService {
             "id": message.guid,
             "phone": message.senderID ?? message.chatIdentifier ?? "",
             "text": message.displayText ?? "",
-            "timestamp": AppleDateConverter.toISO8601(message.id) ?? "",
+            "timestamp": ISO8601DateFormatter().string(from: message.date),
             "is_from_me": message.isFromMe,
             "service": message.service,
         ]
@@ -165,21 +165,34 @@ final class CRMSyncService {
     }
 
     func syncHistory(chatIdentifier: String, chatDB: ChatDatabase, contactName: String? = nil) async {
+        crmLog("[syncHistory] START chatIdentifier=\(chatIdentifier) contact=\(contactName ?? "nil")")
         do {
             let messages = try chatDB.fetchMessages(forChat: chatIdentifier, limit: 10000)
+            crmLog("[syncHistory] fetched \(messages.count) messages from chat.db")
+            if let first = messages.first, let last = messages.last {
+                let fmt = ISO8601DateFormatter()
+                crmLog("[syncHistory] date range: \(fmt.string(from: first.date)) → \(fmt.string(from: last.date))")
+                crmLog("[syncHistory] sample first id=\(first.id) date=\(fmt.string(from: first.date))")
+            }
+
             let batches = stride(from: 0, to: messages.count, by: 100).map {
                 Array(messages[$0..<min($0 + 100, messages.count)])
             }
-            for batch in batches {
+            crmLog("[syncHistory] sending \(batches.count) batch(es)")
+
+            for (batchIdx, batch) in batches.enumerated() {
                 let payload = batch.map { msg -> [String: Any] in
                     var m: [String: Any] = ["id": msg.guid, "phone": msg.senderID ?? chatIdentifier,
-                     "text": msg.displayText ?? "", "timestamp": AppleDateConverter.toISO8601(msg.id) ?? "",
+                     "text": msg.displayText ?? "", "timestamp": ISO8601DateFormatter().string(from: msg.date),
                      "is_from_me": msg.isFromMe, "service": msg.service]
                     if let name = contactName { m["contact_name"] = name }
                     return m
                 }
                 let body: [String: Any] = ["agent_id": config.agentID, "messages": payload]
-                let bodyData = try? JSONSerialization.data(withJSONObject: body)
+                guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
+                    crmLog("[syncHistory] ERROR: failed to serialize batch \(batchIdx)")
+                    continue
+                }
 
                 // Primary
                 if let url = URL(string: "\(config.apiEndpoint)/sync/\(chatIdentifier)/history") {
@@ -188,7 +201,16 @@ final class CRMSyncService {
                     req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
                     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     req.httpBody = bodyData
-                    _ = try? await session.data(for: req)
+                    do {
+                        let (data, response) = try await session.data(for: req)
+                        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+                        let body = String(data: data, encoding: .utf8) ?? "<binary>"
+                        crmLog("[syncHistory] primary batch \(batchIdx) → HTTP \(status): \(body.prefix(200))")
+                    } catch {
+                        crmLog("[syncHistory] primary batch \(batchIdx) ERROR: \(error)")
+                    }
+                } else {
+                    crmLog("[syncHistory] primary: invalid URL from endpoint '\(config.apiEndpoint)'")
                 }
 
                 // Mirror
@@ -199,10 +221,20 @@ final class CRMSyncService {
                     mirrorReq.setValue("Bearer \(config.mirrorApiKey)", forHTTPHeaderField: "Authorization")
                     mirrorReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     mirrorReq.httpBody = bodyData
-                    _ = try? await session.data(for: mirrorReq)
+                    do {
+                        let (data, response) = try await session.data(for: mirrorReq)
+                        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+                        let body = String(data: data, encoding: .utf8) ?? "<binary>"
+                        crmLog("[syncHistory] mirror batch \(batchIdx) → HTTP \(status): \(body.prefix(200))")
+                    } catch {
+                        crmLog("[syncHistory] mirror batch \(batchIdx) ERROR: \(error)")
+                    }
                 }
             }
-        } catch { print("History sync failed: \(error)") }
+            crmLog("[syncHistory] DONE chatIdentifier=\(chatIdentifier)")
+        } catch {
+            crmLog("[syncHistory] FAILED to fetch from chat.db: \(error)")
+        }
     }
 
     @MainActor

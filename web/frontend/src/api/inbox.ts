@@ -11,6 +11,7 @@ export interface InboxThread {
   forwarded_by_name: string;
   forwarded_by_picture: string | null;
   has_read: boolean;
+  is_archived: boolean;
   last_message_text: string | null;
   last_message_at: string | null;
   created_at: string;
@@ -22,11 +23,12 @@ export interface ThreadDetail {
 }
 
 export const inboxApi = {
-  list: () => api.get<InboxThread[]>('/inbox'),
+  list: (archived = false) => api.get<InboxThread[]>(`/inbox${archived ? '?archived=true' : ''}`),
   get: (threadId: string) => api.get<ThreadDetail>(`/inbox/${threadId}`),
   reply: (threadId: string, text: string, attachmentType?: string, attachmentUrl?: string) =>
     api.post(`/inbox/${threadId}/reply`, { text, attachment_type: attachmentType, attachment_url: attachmentUrl }),
   react: (threadId: string, messageGuid: string, reactionType: string) =>
     api.post<{ status: string }>(`/inbox/${threadId}/react`, { message_guid: messageGuid, reaction_type: reactionType }),
   markRead: (threadId: string) => api.patch(`/inbox/${threadId}/read`, {}),
+  archive: (threadId: string) => api.patch(`/inbox/${threadId}/archive`, {}),
 };

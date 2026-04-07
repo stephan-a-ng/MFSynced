@@ -16,27 +16,37 @@ VALID_REACTIONS = {"love", "like", "dislike", "laugh", "emphasize", "question"}
 async def list_inbox(
     user_id: UUID = Depends(get_current_user_id),
     conn: asyncpg.Connection = Depends(get_db),
+    archived: bool = False,
 ) -> list[InboxThreadResponse]:
-    """List all forwarded threads for the current user."""
+    """List forwarded threads for the current user. archived=true returns archived threads.
+
+    One thread per phone number is returned — if the same contact was forwarded from
+    multiple agents (e.g. primary + mirror backend), the thread with the most recent
+    message wins and duplicates are suppressed.
+    """
     rows = await conn.fetch(
-        """SELECT
-               ft.id, ft.phone, ft.agent_id, ft.mode, ft.note, ft.created_at,
-               c.contact_name,
-               u.name AS forwarded_by_name, u.photo_url AS forwarded_by_picture,
-               ftr.has_read,
-               (SELECT m.text FROM messages m
-                WHERE m.phone = ft.phone AND m.agent_id = ft.agent_id
-                ORDER BY m.timestamp DESC LIMIT 1) AS last_message_text,
-               (SELECT m.timestamp FROM messages m
-                WHERE m.phone = ft.phone AND m.agent_id = ft.agent_id
-                ORDER BY m.timestamp DESC LIMIT 1) AS last_message_at
-           FROM forwarded_threads ft
-           JOIN forwarded_thread_recipients ftr ON ft.id = ftr.thread_id
-           JOIN users u ON ft.forwarded_by_user_id = u.id
-           LEFT JOIN conversations c ON ft.phone = c.phone AND ft.agent_id = c.agent_id
-           WHERE ftr.user_id = $1
+        """SELECT * FROM (
+               SELECT DISTINCT ON (ft.phone)
+                   ft.id, ft.phone, ft.agent_id, ft.mode, ft.note, ft.created_at,
+                   c.contact_name,
+                   u.name AS forwarded_by_name, u.photo_url AS forwarded_by_picture,
+                   ftr.has_read, ftr.is_archived,
+                   last_msg.text AS last_message_text,
+                   last_msg.timestamp AS last_message_at
+               FROM forwarded_threads ft
+               JOIN forwarded_thread_recipients ftr ON ft.id = ftr.thread_id
+               JOIN users u ON ft.forwarded_by_user_id = u.id
+               LEFT JOIN conversations c ON ft.phone = c.phone AND ft.agent_id = c.agent_id
+               LEFT JOIN LATERAL (
+                   SELECT text, timestamp FROM messages
+                   WHERE phone = ft.phone AND agent_id = ft.agent_id
+                   ORDER BY timestamp DESC LIMIT 1
+               ) last_msg ON true
+               WHERE ftr.user_id = $1 AND ftr.is_archived = $2
+               ORDER BY ft.phone, last_msg.timestamp DESC NULLS LAST
+           ) deduped
            ORDER BY last_message_at DESC NULLS LAST""",
-        user_id,
+        user_id, archived,
     )
     return [InboxThreadResponse(**dict(r)) for r in rows]
 
@@ -72,12 +82,13 @@ async def get_thread(
     thread = InboxThreadResponse(
         **dict(row),
         has_read=recipient["has_read"],
+        is_archived=recipient["is_archived"],
         last_message_text=None,
         last_message_at=None,
     )
 
-    # Get messages with reactions
-    messages = await fetch_messages_with_reactions(conn, row["phone"], row["agent_id"])
+    # Get messages with reactions (fetch up to 500 so full conversation context is visible)
+    messages = await fetch_messages_with_reactions(conn, row["phone"], row["agent_id"], limit=500)
 
     return ThreadDetailResponse(
         thread=thread,
@@ -90,6 +101,22 @@ async def get_thread(
             for m in messages
         ],
     )
+
+@router.patch("/{thread_id}/archive")
+async def archive_thread(
+    thread_id: UUID,
+    user_id: UUID = Depends(get_current_user_id),
+    conn: asyncpg.Connection = Depends(get_db),
+):
+    """Archive a thread for the current user."""
+    await conn.execute(
+        """UPDATE forwarded_thread_recipients
+           SET is_archived = true
+           WHERE thread_id = $1 AND user_id = $2""",
+        thread_id, user_id,
+    )
+    return {"status": "archived"}
+
 
 @router.post("/{thread_id}/reply")
 async def reply_to_thread(
@@ -121,6 +148,14 @@ async def reply_to_thread(
            VALUES ($1, $2, $3, $4, $5, $6, $7)""",
         thread["agent_id"], thread["phone"], body.text or "", user_id, thread_id,
         body.attachment_type, body.attachment_url,
+    )
+
+    # Unarchive for all recipients when a message is sent
+    await conn.execute(
+        """UPDATE forwarded_thread_recipients
+           SET is_archived = false
+           WHERE thread_id = $1 AND is_archived = true""",
+        thread_id,
     )
 
     return {"status": "queued"}

@@ -30,7 +30,7 @@ async def store_inbound_messages(
                 """INSERT INTO messages (guid, agent_id, phone, text, timestamp, is_from_me, service,
                                         attachment_type, attachment_url, attachment_mime_type, attachment_filename)
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-                   ON CONFLICT (guid, agent_id) DO NOTHING""",
+                   ON CONFLICT (guid, agent_id) DO UPDATE SET timestamp = EXCLUDED.timestamp""",
                 guid, agent_id, phone,
                 msg.get("text", ""),
                 timestamp,
@@ -67,6 +67,21 @@ async def store_inbound_messages(
                 )
         except Exception as e:
             logger.error("Failed to store message %s: %s", msg.get("id"), e)
+
+    # Unarchive threads for all recipients when a new inbound message arrives
+    seen_phones = {(m.get("phone", ""), str(agent_id)) for m in messages if not m.get("is_from_me", False)}
+    for phone, _ in seen_phones:
+        if phone:
+            await conn.execute(
+                """UPDATE forwarded_thread_recipients ftr
+                   SET is_archived = false
+                   FROM forwarded_threads ft
+                   WHERE ft.id = ftr.thread_id
+                     AND ft.phone = $1
+                     AND ft.agent_id = $2
+                     AND ftr.is_archived = true""",
+                phone, agent_id,
+            )
 
     return confirmed
 

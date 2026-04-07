@@ -13,6 +13,7 @@ class InboxThreadResponse(BaseModel):
     forwarded_by_name: str
     forwarded_by_picture: Optional[str] = None
     has_read: bool = False
+    is_archived: bool = False
     last_message_text: Optional[str] = None
     last_message_at: Optional[datetime] = None
     created_at: datetime

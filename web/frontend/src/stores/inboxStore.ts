@@ -6,9 +6,10 @@ interface InboxState {
   threads: InboxThread[];
   loading: boolean;
   fetchInbox: () => Promise<void>;
+  archiveThread: (threadId: string) => Promise<void>;
 }
 
-export const useInboxStore = create<InboxState>((set) => ({
+export const useInboxStore = create<InboxState>((set, get) => ({
   threads: [],
   loading: true,
   fetchInbox: async () => {
@@ -19,5 +20,10 @@ export const useInboxStore = create<InboxState>((set) => ({
     } catch {
       set({ loading: false });
     }
+  },
+  archiveThread: async (threadId: string) => {
+    await inboxApi.archive(threadId);
+    // Optimistically remove from list
+    set({ threads: get().threads.filter(t => t.id !== threadId) });
   },
 }));
