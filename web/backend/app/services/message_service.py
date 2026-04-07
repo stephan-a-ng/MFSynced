@@ -118,12 +118,17 @@ async def fetch_messages_with_reactions(
 ) -> list[dict]:
     """Fetch messages with their reactions for a conversation."""
     rows = await conn.fetch(
-        """SELECT id, guid, phone, text, timestamp, is_from_me, service,
-                  attachment_type, attachment_url, attachment_mime_type, attachment_filename
-           FROM messages
-           WHERE phone = $1 AND agent_id = $2
-           ORDER BY timestamp ASC
-           LIMIT $3 OFFSET $4""",
+        """SELECT sub.id, sub.guid, sub.phone, sub.text, sub.timestamp, sub.is_from_me, sub.service,
+                  sub.attachment_type, sub.attachment_url, sub.attachment_mime_type, sub.attachment_filename
+           FROM (
+               SELECT id, guid, phone, text, timestamp, is_from_me, service,
+                      attachment_type, attachment_url, attachment_mime_type, attachment_filename
+               FROM messages
+               WHERE phone = $1 AND agent_id = $2
+               ORDER BY timestamp DESC
+               LIMIT $3 OFFSET $4
+           ) sub
+           ORDER BY sub.timestamp ASC""",
         phone, agent_id, limit, offset,
     )
 

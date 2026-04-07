@@ -82,10 +82,36 @@ export function ThreadViewPage() {
   }, [data?.messages.length]);
 
   const handleReply = async (text: string, attachmentType?: string, attachmentUrl?: string) => {
-    if (!threadId) return;
+    if (!threadId || !data) return;
+
+    // Show the sent message immediately before the backend round-trip
+    const optimisticGuid = `pending-${crypto.randomUUID()}`;
+    const optimisticMsg = {
+      id: crypto.randomUUID(),
+      guid: optimisticGuid,
+      phone: data.thread.phone,
+      text,
+      timestamp: new Date().toISOString(),
+      is_from_me: true,
+      service: 'iMessage',
+      attachment_type: attachmentType ?? null,
+      attachment_url: attachmentUrl ?? null,
+      attachment_mime_type: null,
+      attachment_filename: null,
+      reactions: [],
+    };
+    setData(prev => prev ? { ...prev, messages: [...prev.messages, optimisticMsg] } : prev);
+
     await inboxApi.reply(threadId, text, attachmentType, attachmentUrl);
+
+    // Refetch and preserve any optimistic messages not yet in the DB
     const updated = await inboxApi.get(threadId);
-    setData(updated);
+    setData(prev => {
+      if (!prev) return updated;
+      const realGuids = new Set(updated.messages.map(m => m.guid));
+      const pending = prev.messages.filter(m => m.guid.startsWith('pending-') && !realGuids.has(m.guid));
+      return { ...updated, messages: [...updated.messages, ...pending] };
+    });
   };
 
   const handleArchive = async () => {
