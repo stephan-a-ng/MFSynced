@@ -5,6 +5,7 @@ struct ForwardSheet: View {
     let config: CRMConfig
     var contactName: String?
     var onDismiss: () -> Void
+    var onForwardSuccess: (() -> Void)? = nil
 
     @State private var teamMembers: [TeamMember] = []
     @State private var selectedMemberID: String?
@@ -104,6 +105,7 @@ struct ForwardSheet: View {
             TextField("Add a note...", text: $note, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...3)
+                .onSubmit { if selectedMemberID != nil { doForward() } }
         }
     }
 
@@ -189,6 +191,7 @@ struct ForwardSheet: View {
                 isForwarding = false
                 if primaryOK {
                     didForward = true
+                    onForwardSuccess?()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { onDismiss() }
                 } else {
                     errorMessage = "Forward failed. Is this conversation synced?"

@@ -124,7 +124,8 @@ struct SidebarView: View {
                         crmConfig: appState.crmConfig,
                         onSelect: { appState.selectConversation(conversation) },
                         onToggleCRMSync: { appState.toggleCRMSync(for: conversation) },
-                        onSyncHistory: { Task { await appState.syncHistoryToCRM(for: conversation) } }
+                        onSyncHistory: { Task { await appState.syncHistoryToCRM(for: conversation) } },
+                        onForwardSuccess: { Task { await appState.enableCRMSyncIfNeeded(for: conversation) } }
                     )
                 }
             }
@@ -143,6 +144,7 @@ private struct ConversationRow: View {
     let onSelect: () -> Void
     let onToggleCRMSync: () -> Void
     let onSyncHistory: () -> Void
+    let onForwardSuccess: () -> Void
 
     @State private var isHovered = false
     @State private var showForwardPopover = false
@@ -199,7 +201,8 @@ private struct ConversationRow: View {
                             conversation: conversation,
                             config: crmConfig,
                             contactName: contact.fullName,
-                            onDismiss: { showForwardPopover = false }
+                            onDismiss: { showForwardPopover = false },
+                            onForwardSuccess: onForwardSuccess
                         )
                     }
                 }

@@ -42,6 +42,34 @@ final class AppState {
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.pollForNewMessages()
         }
+
+        // Diagnostic: dump the +12039185024 thread immediately on startup
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.dumpThreadDiagnostic(chatIdentifier: "+12039185024")
+        }
+    }
+
+    private func dumpThreadDiagnostic(chatIdentifier: String) {
+        do {
+            let msgs = try chatDB.fetchMessages(forChat: chatIdentifier, limit: 50)
+            appLog("[diag] \(chatIdentifier) → \(msgs.count) messages")
+            let iso = ISO8601DateFormatter()
+            let lines = msgs.map { m -> String in
+                let ts = iso.string(from: m.date)
+                let dir = m.isFromMe ? "me  " : "them"
+                return "[\(ts)][\(dir)] \(m.displayText ?? "(nil)")"
+            }
+            let dump = "Thread: \(chatIdentifier) (\(msgs.count) msgs)\n" + lines.joined(separator: "\n") + "\n"
+            let dumpPath = NSHomeDirectory() + "/Library/Logs/mfsynced_messages.txt"
+            if let data = dump.data(using: .utf8) {
+                if let handle = FileHandle(forWritingAtPath: dumpPath) {
+                    handle.truncateFile(atOffset: 0); handle.write(data); handle.closeFile()
+                } else { try? data.write(to: URL(fileURLWithPath: dumpPath)) }
+            }
+            appLog("[diag] dump written to mfsynced_messages.txt")
+        } catch {
+            appLog("[diag] ERROR: \(error)")
+        }
     }
 
     func stopPolling() {
@@ -51,6 +79,7 @@ final class AppState {
     }
 
     func selectConversation(_ conversation: Conversation) {
+        appLog("[AppState] selectConversation id=\(conversation.id)")
         selectedConversation = conversation
         loadMessages(for: conversation)
     }
@@ -80,7 +109,29 @@ final class AppState {
     func loadMessages(for conversation: Conversation) {
         do {
             messages = try chatDB.fetchMessages(forChat: conversation.id, limit: 200)
+            appLog("[AppState] loadMessages id=\(conversation.id) count=\(messages.count)")
+            // Dump all parsed messages to a readable log file
+            let iso = ISO8601DateFormatter()
+            let lines = messages.map { m -> String in
+                let ts = iso.string(from: m.date)
+                let dir = m.isFromMe ? "me  " : "them"
+                let text = m.displayText ?? "(nil)"
+                return "[\(ts)][\(dir)] \(text)"
+            }
+            let dump = "Thread: \(conversation.id) (\(messages.count) msgs)\n" + lines.joined(separator: "\n") + "\n"
+            appLog("[AppState] dump preview: \(lines.last ?? "(none)")")
+            let dumpPath = NSHomeDirectory() + "/Library/Logs/mfsynced_messages.txt"
+            if let dumpData = dump.data(using: .utf8) {
+                if let handle = FileHandle(forWritingAtPath: dumpPath) {
+                    handle.truncateFile(atOffset: 0)
+                    handle.write(dumpData)
+                    handle.closeFile()
+                } else {
+                    try? dumpData.write(to: URL(fileURLWithPath: dumpPath))
+                }
+            }
         } catch {
+            appLog("[AppState] loadMessages ERROR: \(error)")
             print("Failed to load messages: \(error)")
         }
     }
@@ -158,9 +209,41 @@ final class AppState {
         isSearching = false
     }
 
+    private func appLog(_ message: String) {
+        let path = NSHomeDirectory() + "/Library/Logs/mfsynced_crm.log"
+        let line = "\(Date()): \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile(); handle.write(data); handle.closeFile()
+        } else {
+            try? data.write(to: URL(fileURLWithPath: path))
+        }
+    }
+
     func syncHistoryToCRM(for conversation: Conversation) async {
         let contactName = contactStore.contact(for: conversation.id).fullName
-        await crmService?.syncHistory(chatIdentifier: conversation.id, chatDB: chatDB, contactName: contactName)
+        appLog("[AppState] syncHistoryToCRM called id=\(conversation.id) crmService=\(crmService != nil)")
+        guard let svc = crmService else {
+            appLog("[AppState] ERROR: crmService is nil — skipping sync")
+            return
+        }
+        await svc.syncHistory(chatIdentifier: conversation.id, chatDB: chatDB, contactName: contactName)
+    }
+
+    /// Enables CRM sync for a conversation and syncs history if it wasn't already enabled.
+    /// Called automatically when a conversation is forwarded to a teammate.
+    func enableCRMSyncIfNeeded(for conversation: Conversation) async {
+        guard !crmConfig.syncedPhoneNumbers.contains(conversation.id) else { return }
+        crmConfig.syncedPhoneNumbers.insert(conversation.id)
+        crmConfig.save()
+        crmService?.updateConfig(crmConfig)
+        if let idx = conversations.firstIndex(where: { $0.id == conversation.id }) {
+            conversations[idx].isCRMSynced = true
+            if selectedConversation?.id == conversation.id {
+                selectedConversation = conversations[idx]
+            }
+        }
+        await syncHistoryToCRM(for: conversation)
     }
 }
 
