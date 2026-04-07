@@ -179,13 +179,28 @@ final class CRMSyncService {
                     return m
                 }
                 let body: [String: Any] = ["agent_id": config.agentID, "messages": payload]
-                guard let url = URL(string: "\(config.apiEndpoint)/sync/\(chatIdentifier)/history") else { continue }
-                var request = URLRequest(url: url)
-                request.httpMethod = "POST"
-                request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-                _ = try? await session.data(for: request)
+                let bodyData = try? JSONSerialization.data(withJSONObject: body)
+
+                // Primary
+                if let url = URL(string: "\(config.apiEndpoint)/sync/\(chatIdentifier)/history") {
+                    var req = URLRequest(url: url)
+                    req.httpMethod = "POST"
+                    req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    req.httpBody = bodyData
+                    _ = try? await session.data(for: req)
+                }
+
+                // Mirror
+                if config.hasMirror,
+                   let mirrorURL = URL(string: "\(config.mirrorApiEndpoint)/sync/\(chatIdentifier)/history") {
+                    var mirrorReq = URLRequest(url: mirrorURL)
+                    mirrorReq.httpMethod = "POST"
+                    mirrorReq.setValue("Bearer \(config.mirrorApiKey)", forHTTPHeaderField: "Authorization")
+                    mirrorReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    mirrorReq.httpBody = bodyData
+                    _ = try? await session.data(for: mirrorReq)
+                }
             }
         } catch { print("History sync failed: \(error)") }
     }
