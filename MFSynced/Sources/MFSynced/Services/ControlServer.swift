@@ -189,7 +189,8 @@ final class ControlServer {
             completion(400, jsonData(["error": "Missing phone or text in request body"]))
             return
         }
-        let result = MessageSender.send(text: text, to: phone)
+        let hint = syncService.chatServiceHint?(phone)
+        let result = MessageSender.send(text: text, to: phone, preferredService: hint)
         switch result {
         case .success:
             completion(200, jsonData(["status": "sent", "phone": phone]))

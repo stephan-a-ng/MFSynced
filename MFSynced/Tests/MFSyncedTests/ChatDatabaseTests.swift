@@ -50,4 +50,14 @@ final class ChatDatabaseTests: XCTestCase {
         let results = try db.searchMessages(query: "the", limit: 10)
         XCTAssertFalse(results.isEmpty)
     }
+
+    func testServiceForChatReturnsKnownService() throws {
+        guard db != nil else { throw XCTSkip("chat.db not available") }
+        let conversations = try db.fetchConversations()
+        guard let first = conversations.first else { throw XCTSkip("no chats") }
+        let service = db.serviceForChat(identifier: first.id)
+        // Every real chat row carries a service name; unknown identifiers get nil.
+        XCTAssertNotNil(service)
+        XCTAssertNil(db.serviceForChat(identifier: "+10000000000-nonexistent"))
+    }
 }

@@ -111,6 +111,23 @@ final class ChatDatabase {
         return parseMessageRows(stmt).reversed()
     }
 
+    /// The Messages service a chat lives on ("iMessage", "SMS" (Short Message
+    /// Service), "RCS" (Rich Communication Services)...),
+    /// or nil for an unknown identifier. Drives outbound service selection:
+    /// a non-iMessage thread should be sent via the SMS-forwarding account.
+    func serviceForChat(identifier: String) -> String? {
+        guard let db = try? openConnection() else { return nil }
+        defer { sqlite3_close(db) }
+
+        let sql = "SELECT service_name FROM chat WHERE chat_identifier = ? LIMIT 1"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (identifier as NSString).utf8String, -1, nil)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return columnText(stmt, 0)
+    }
+
     func fetchConversations() throws -> [Conversation] {
         let db = try openConnection()
         defer { sqlite3_close(db) }

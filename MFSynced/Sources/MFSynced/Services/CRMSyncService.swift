@@ -42,6 +42,10 @@ final class CRMSyncService {
 
     private var config: CRMConfig
     private let syncQueue: SyncQueueDatabase
+    /// Looks up a chat's Messages service ("iMessage"/"SMS"/...) so outbound
+    /// sends target the right account. Injected (ChatDatabase-backed) so the
+    /// sync service stays testable without a live chat.db.
+    var chatServiceHint: ((String) -> String?)?
     private var pollTimer: Timer?
     private let session = URLSession.shared
 
@@ -168,7 +172,8 @@ final class CRMSyncService {
                     }
                     crmLog("[CRM] pullOutbound: auto-enabled sync for new contact \(phone)")
                 }
-                let result = MessageSender.send(text: text, to: phone)
+                let hint = chatServiceHint?(phone)
+                let result = MessageSender.send(text: text, to: phone, preferredService: hint)
                 let status: String
                 let sendSuccess: Bool
                 var sendError: String? = nil
