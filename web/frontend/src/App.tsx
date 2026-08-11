@@ -1,8 +1,8 @@
-import { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, NavLink, useNavigate } from 'react-router-dom';
+import { useEffect, useState } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { Inbox, Smartphone, LogOut, Loader2 } from 'lucide-react';
-import { useAuthStore } from './stores/authStore';
-import { authApi } from './api/auth';
+import { useAuthStore } from './shared/auth/store';
+import { startProactiveRefresh } from './shared/auth/scheduler';
 import { ThemeToggle } from './components/ThemeToggle';
 import { LoginPage } from './pages/LoginPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
@@ -11,14 +11,28 @@ import { ConversationsPage } from './pages/ConversationsPage';
 import { ThreadViewPage } from './pages/ThreadViewPage';
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
-  const { user, token, loading, loadUser, setAppEnv } = useAuthStore();
+  const { user, accessToken, loadUser } = useAuthStore();
+  const location = useLocation();
+  // Local "have we tried to hydrate the session yet" flag — distinct from
+  // the store's `loading`, which is just loadUser()'s single-flight mutex
+  // (false by default, not "true until the first load resolves").
+  const [hydrating, setHydrating] = useState(true);
 
   useEffect(() => {
-    loadUser();
-    authApi.config().then((cfg) => setAppEnv(cfg.env)).catch(() => {});
+    startProactiveRefresh();
+    if (accessToken) {
+      loadUser()
+        .catch(() => {})
+        .finally(() => setHydrating(false));
+    } else {
+      setHydrating(false);
+    }
+    // Only ever run once on mount — loadUser/accessToken changes afterward
+    // (e.g. a token refresh) must not re-trigger hydration.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (loading) {
+  if (hydrating) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <Loader2 size={24} className="animate-spin text-muted-foreground" />
@@ -26,12 +40,14 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
     );
   }
 
-  if (!token || !user) return <Navigate to="/login" replace />;
+  if (!accessToken || !user) {
+    return <Navigate to="/login" state={{ from: location.pathname }} replace />;
+  }
   return <>{children}</>;
 }
 
 function Layout({ children }: { children: React.ReactNode }) {
-  const { user, logout, appEnv } = useAuthStore();
+  const { user, logout } = useAuthStore();
   const navigate = useNavigate();
 
   const handleLogout = () => {
@@ -51,11 +67,6 @@ function Layout({ children }: { children: React.ReactNode }) {
         <div className="p-4 border-b border-border">
           <div className="flex items-center gap-2">
             <h1 className="font-bold text-lg text-foreground">MFSynced</h1>
-            {appEnv === 'staging' && (
-              <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase rounded bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
-                Staging
-              </span>
-            )}
           </div>
           <p className="text-xs text-muted-foreground">Team iMessage Hub</p>
         </div>
