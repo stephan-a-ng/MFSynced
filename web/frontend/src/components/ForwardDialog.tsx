@@ -69,7 +69,7 @@ export function ForwardDialog({ phone, agentId, contactName, onClose, onForwarde
               onClick={() => setMode(m)}
               className={`flex-1 py-2 text-sm rounded-md border transition-colors ${
                 mode === m
-                  ? 'border-primary bg-primary text-primary-foreground font-medium'
+                  ? 'border-primary bg-primary/10 text-primary font-medium'
                   : 'border-border text-muted-foreground hover:bg-muted'
               }`}
             >

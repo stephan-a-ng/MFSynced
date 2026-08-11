@@ -74,7 +74,7 @@ function Layout({ children }: { children: React.ReactNode }) {
               className={({ isActive }) =>
                 `flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
                   isActive
-                    ? 'bg-primary text-primary-foreground font-medium'
+                    ? 'bg-primary/10 text-primary font-medium'
                     : 'text-muted-foreground hover:bg-muted hover:text-foreground'
                 }`
               }

@@ -59,7 +59,7 @@ export function ConversationsPage() {
               )}
               <button
                 onClick={(e) => { e.preventDefault(); e.stopPropagation(); setForwardTarget(c); }}
-                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
+                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
               >
                 <Forward size={14} />
                 Forward

@@ -19,19 +19,21 @@
 }
 
 @theme {
-  --color-background: #fcfbf9;
-  --color-foreground: #1a1508;
-  --color-card: #ffffff;
-  --color-card-foreground: #1a1508;
-  --color-primary: oklch(0.84 0.16 90);
-  --color-primary-foreground: #1a1508;
-  --color-muted: rgb(26 21 8 / 6%);
-  --color-muted-foreground: rgb(26 21 8 / 62%);
-  --color-border: rgb(26 21 8 / 14%);
-  --color-input: rgb(26 21 8 / 14%);
-  --color-ring: oklch(0.84 0.16 90);
-  --color-destructive: #991b1b;
-  --color-destructive-foreground: #fef2f2;
+  /* Light mode is the app's ORIGINAL neutral/blue palette by request —
+     only dark mode carries the deploy-console brand plane below. */
+  --color-background: oklch(1 0 0);
+  --color-foreground: oklch(0.145 0.004 285.82);
+  --color-card: oklch(1 0 0);
+  --color-card-foreground: oklch(0.145 0.004 285.82);
+  --color-primary: oklch(0.546 0.245 262.88);
+  --color-primary-foreground: oklch(0.985 0.002 247.86);
+  --color-muted: oklch(0.967 0.001 286.38);
+  --color-muted-foreground: oklch(0.556 0.014 285.94);
+  --color-border: oklch(0.922 0.004 286.32);
+  --color-input: oklch(0.922 0.004 286.32);
+  --color-ring: oklch(0.546 0.245 262.88);
+  --color-destructive: oklch(0.577 0.245 27.33);
+  --color-destructive-foreground: oklch(0.985 0.002 0);
 
   --font-brand: "HEX Franklin", ui-sans-serif, system-ui, sans-serif;
 
