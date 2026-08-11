@@ -28,7 +28,7 @@ export function LoginPage() {
         <ThemeToggle />
       </div>
       <div className="bg-card border border-border rounded-xl shadow-sm p-8 max-w-sm w-full text-center animate-fade-in">
-        <h1 className="text-2xl font-bold text-foreground mb-2">MFSynced</h1>
+        <h1 className="font-brand text-3xl font-extrabold text-foreground mb-2">MFSynced</h1>
         <p className="text-muted-foreground text-sm mb-1">Team iMessage Hub</p>
         <p className="text-muted-foreground text-xs mb-6">Sign in with your @moonfive.tech email</p>
         {error && <p className="text-destructive text-sm mb-4">{error}</p>}

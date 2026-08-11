@@ -2,20 +2,38 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+/*
+ * Moon Five brand (ported from deploy.moonfive.tech's console design system):
+ *  - HEX Franklin (variable, vendored) — display font for identity titles
+ *    (the wordmark, page titles), not body text.
+ *  - Canon yellow oklch(0.84 0.16 90) — the single brand accent; primary
+ *    actions and outgoing bubbles carry it with warm-ink text.
+ *  - Warm near-black ink #1a1508 / warm cream #f2ead6 — deploy's ink pair;
+ *    the dark plane is deploy's #171208 shell, not a blue-cast gray.
+ */
+@font-face {
+  font-family: "HEX Franklin";
+  src: url("/fonts/HEXFranklin-Variable.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
 @theme {
-  --color-background: oklch(1 0 0);
-  --color-foreground: oklch(0.145 0.004 285.82);
-  --color-card: oklch(1 0 0);
-  --color-card-foreground: oklch(0.145 0.004 285.82);
-  --color-primary: oklch(0.546 0.245 262.88);
-  --color-primary-foreground: oklch(0.985 0.002 247.86);
-  --color-muted: oklch(0.967 0.001 286.38);
-  --color-muted-foreground: oklch(0.556 0.014 285.94);
-  --color-border: oklch(0.922 0.004 286.32);
-  --color-input: oklch(0.922 0.004 286.32);
-  --color-ring: oklch(0.546 0.245 262.88);
-  --color-destructive: oklch(0.577 0.245 27.33);
-  --color-destructive-foreground: oklch(0.985 0.002 0);
+  --color-background: #fcfbf9;
+  --color-foreground: #1a1508;
+  --color-card: #ffffff;
+  --color-card-foreground: #1a1508;
+  --color-primary: oklch(0.84 0.16 90);
+  --color-primary-foreground: #1a1508;
+  --color-muted: rgb(26 21 8 / 6%);
+  --color-muted-foreground: rgb(26 21 8 / 62%);
+  --color-border: rgb(26 21 8 / 14%);
+  --color-input: rgb(26 21 8 / 14%);
+  --color-ring: oklch(0.84 0.16 90);
+  --color-destructive: #991b1b;
+  --color-destructive-foreground: #fef2f2;
+
+  --font-brand: "HEX Franklin", ui-sans-serif, system-ui, sans-serif;
 
   --radius-lg: 0.5rem;
   --radius-md: calc(var(--radius-lg) - 2px);
@@ -26,29 +44,45 @@
 
 @layer base {
   .dark {
-    --color-background: oklch(0.145 0.004 285.82);
-    --color-foreground: oklch(0.985 0.002 247.86);
-    --color-card: oklch(0.205 0.006 285.88);
-    --color-card-foreground: oklch(0.985 0.002 247.86);
-    --color-primary: oklch(0.623 0.214 259.13);
-    --color-primary-foreground: oklch(0.985 0.002 247.86);
-    --color-muted: oklch(0.269 0.006 286.03);
-    --color-muted-foreground: oklch(0.711 0.013 286.07);
-    --color-border: oklch(0.355 0.008 285.95);
-    --color-input: oklch(0.355 0.008 285.95);
-    --color-ring: oklch(0.623 0.214 259.13);
-    --color-destructive: oklch(0.577 0.245 27.33);
-    --color-destructive-foreground: oklch(0.985 0.002 0);
+    /* deploy's dark plane verbatim: warm near-black shell, cream ink,
+       canon-yellow accent with ink text. */
+    --color-background: #171208;
+    --color-foreground: #f2ead6;
+    --color-card: #231c0e;
+    --color-card-foreground: #f2ead6;
+    --color-primary: oklch(0.84 0.16 90);
+    --color-primary-foreground: #1a1508;
+    --color-muted: rgb(242 234 214 / 8%);
+    --color-muted-foreground: rgb(242 234 214 / 62%);
+    --color-border: rgb(242 234 214 / 16%);
+    --color-input: rgb(242 234 214 / 16%);
+    --color-ring: oklch(0.84 0.16 90);
+    --color-destructive: #fca5a5;
+    --color-destructive-foreground: #1a1508;
+  }
+
+  html {
+    /* Native chrome (form popups, scrollbars) follows the theme; the toggle
+       flips color-scheme via the .dark block below. */
+    color-scheme: light;
+    scrollbar-color: rgb(26 21 8 / 20%) transparent;
+    scrollbar-width: thin;
+  }
+  html.dark {
+    color-scheme: dark;
+    scrollbar-color: rgb(242 234 214 / 18%) transparent;
   }
 
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
+    font-family: ui-sans-serif, system-ui, sans-serif;
   }
 }
 
-* {
-  scrollbar-width: thin;
-  scrollbar-color: oklch(0.7 0 0 / 0.3) transparent;
+/* Identity/display type — page titles and the wordmark. */
+.font-brand {
+  font-family: var(--font-brand);
+  letter-spacing: 0.01em;
 }
 
 @keyframes fade-in {

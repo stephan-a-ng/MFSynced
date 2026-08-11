@@ -26,7 +26,7 @@ export function ConversationsPage() {
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-2">
           <Smartphone size={24} />
-          <h1 className="text-xl font-semibold text-foreground">My Conversations</h1>
+          <h1 className="font-brand text-xl font-semibold text-foreground">My Conversations</h1>
         </div>
         <button
           onClick={() => setComposeOpen(true)}
@@ -59,7 +59,7 @@ export function ConversationsPage() {
               )}
               <button
                 onClick={(e) => { e.preventDefault(); e.stopPropagation(); setForwardTarget(c); }}
-                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
               >
                 <Forward size={14} />
                 Forward
