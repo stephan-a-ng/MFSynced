@@ -1,10 +1,75 @@
 import logging
 from uuid import UUID
 from datetime import datetime, timezone
+from typing import Optional
 
 import asyncpg
 
 logger = logging.getLogger(__name__)
+
+
+async def queue_outbound_message(
+    conn: asyncpg.Connection,
+    *,
+    agent_id: UUID,
+    phone: str,
+    text: str,
+    created_by_user_id: UUID,
+    idempotency_key: Optional[str] = None,
+    attachment_type: Optional[str] = None,
+    attachment_url: Optional[str] = None,
+    forwarded_thread_id: Optional[UUID] = None,
+) -> tuple[dict, bool]:
+    """Queue an outbound command, deduplicating on (created_by_user_id, idempotency_key).
+
+    Returns (row, created) — created=True only when this call actually
+    inserted the row; a replayed idempotency_key returns the original row
+    with created=False.
+    """
+    if idempotency_key is not None:
+        existing = await conn.fetchrow(
+            """SELECT * FROM outbound_commands
+               WHERE created_by_user_id = $1 AND idempotency_key = $2""",
+            created_by_user_id, idempotency_key,
+        )
+        if existing is not None:
+            logger.info("queue_outbound_message idempotent replay user_id=%s key=%s cmd_id=%s",
+                        created_by_user_id, idempotency_key, existing["id"])
+            return dict(existing), False
+
+    row = await conn.fetchrow(
+        """INSERT INTO outbound_commands
+               (agent_id, phone, text, created_by_user_id, forwarded_thread_id,
+                attachment_type, attachment_url, idempotency_key)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (created_by_user_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+           DO NOTHING
+           RETURNING *""",
+        agent_id, phone, text, created_by_user_id, forwarded_thread_id,
+        attachment_type, attachment_url, idempotency_key,
+    )
+    if row is not None:
+        logger.info("queue_outbound_message inserted agent_id=%s phone=%s cmd_id=%s",
+                    agent_id, phone, row["id"])
+        return dict(row), True
+
+    # Lost the insert race against a concurrent request with the same
+    # (created_by_user_id, idempotency_key) — re-select the winner's row.
+    existing = await conn.fetchrow(
+        """SELECT * FROM outbound_commands
+           WHERE created_by_user_id = $1 AND idempotency_key = $2""",
+        created_by_user_id, idempotency_key,
+    )
+    if existing is None:
+        # Should be unreachable: a DO NOTHING conflict means a matching
+        # row exists. Fail loudly rather than return something bogus.
+        raise RuntimeError(
+            "queue_outbound_message: insert conflicted but no existing row found "
+            f"for created_by_user_id={created_by_user_id} idempotency_key={idempotency_key}"
+        )
+    logger.info("queue_outbound_message lost race, replaying existing user_id=%s key=%s cmd_id=%s",
+                created_by_user_id, idempotency_key, existing["id"])
+    return dict(existing), False
 
 
 async def fetch_pending_commands(

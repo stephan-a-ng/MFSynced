@@ -154,6 +154,20 @@ final class CRMSyncService {
                       let phone = msg["phone"] as? String,
                       let text = msg["text"] as? String else { continue }
                 crmLog("[CRM] pullOutbound: sending cmd=\(cmdID) to=\(phone) text_len=\(text.count)")
+                // A portal-initiated send may target a phone that was never
+                // opted in to sync; without opting it in here, the sent message
+                // and any reply never flow back to the backend.
+                // Mutate config on the main actor: updateConfig() writes from
+                // the settings UI there, and this is the only other writer.
+                if !config.syncedPhoneNumbers.contains(phone) {
+                    await MainActor.run {
+                        if !self.config.syncedPhoneNumbers.contains(phone) {
+                            self.config.syncedPhoneNumbers.insert(phone)
+                            self.config.save()
+                        }
+                    }
+                    crmLog("[CRM] pullOutbound: auto-enabled sync for new contact \(phone)")
+                }
                 let result = MessageSender.send(text: text, to: phone)
                 let status: String
                 let sendSuccess: Bool

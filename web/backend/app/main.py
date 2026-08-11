@@ -12,7 +12,7 @@ from slowapi.errors import RateLimitExceeded
 from app.config import settings
 from app.db import init_pool, close_pool
 from app.rate_limit import limiter
-from app.api import auth, health, users, agent, conversations, forward, inbox, upload
+from app.api import auth, health, users, agent, conversations, forward, inbox, upload, messages
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,6 +86,7 @@ app.include_router(conversations.router)
 app.include_router(forward.router)
 app.include_router(inbox.router)
 app.include_router(upload.router)
+app.include_router(messages.router)
 
 # Serve uploaded files
 app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")

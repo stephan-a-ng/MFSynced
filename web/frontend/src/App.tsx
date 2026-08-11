@@ -8,6 +8,7 @@ import { LoginPage } from './pages/LoginPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
 import { DashboardPage } from './pages/DashboardPage';
 import { ConversationsPage } from './pages/ConversationsPage';
+import { ConversationThreadPage } from './pages/ConversationThreadPage';
 import { ThreadViewPage } from './pages/ThreadViewPage';
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
@@ -136,6 +137,7 @@ export default function App() {
                 <Routes>
                   <Route path="/" element={<DashboardPage />} />
                   <Route path="/conversations" element={<ConversationsPage />} />
+                  <Route path="/conversations/:phone" element={<ConversationThreadPage />} />
                   <Route path="/inbox/:threadId" element={<ThreadViewPage />} />
                 </Routes>
               </Layout>
