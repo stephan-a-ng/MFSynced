@@ -14,5 +14,8 @@
 	<!-- Control server for e2e testing (localhost only) -->
 	<key>com.apple.security.network.server</key>
 	<true/>
+	<!-- AppleScript to Messages.app for sending iMessages -->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
 </dict>
 </plist>
