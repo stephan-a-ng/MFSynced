@@ -42,6 +42,20 @@ final class CRMSyncService {
 
     private var config: CRMConfig
     private let syncQueue: SyncQueueDatabase
+    /// Looks up a chat's Messages service ("iMessage"/"SMS"/...) so outbound
+    /// sends target the right account. Injected (ChatDatabase-backed) so the
+    /// sync service stays testable without a live chat.db.
+    var chatServiceHint: ((String) -> String?)?
+    /// CNContactStore name + JPEG for a phone; injected like chatServiceHint.
+    var contactInfoProvider: ((String) -> (name: String?, photoJPEG: Data?))?
+    // Internal (not private) for test visibility of retry semantics.
+    var pushedContactPhones = Set<String>()
+    /// chat.db's current max message ROWID — watermark taken just before a
+    /// send so the verifier can find the row that send created.
+    var chatMaxRowID: (() -> Int64)?
+    /// Delivery state (receipt + error code) of the first outgoing message
+    /// after a watermark; nil until Messages writes the row.
+    var deliveryProbe: ((String, Int64) -> (delivered: Bool, errorCode: Int)?)?
     private var pollTimer: Timer?
     private let session = URLSession.shared
 
@@ -88,7 +102,71 @@ final class CRMSyncService {
         crmLog("[CRM] poll() called")
         await pushInbound()
         await pullOutbound()
+        await pushContactInfo()
         await updateCounts()
+    }
+
+    /// Push CNContactStore name+photo for synced phones the backend hasn't
+    /// been given yet this app session. Once per phone per launch: uploads
+    /// are ephemeral on the backend, so each launch re-heals the avatars.
+    func pushContactInfo() async {
+        guard let provider = contactInfoProvider else { return }
+        for phone in config.syncedPhoneNumbers where !pushedContactPhones.contains(phone) {
+            let (name, photoJPEG) = provider(phone)
+            // Not marked pushed yet: an unresolved contact (ContactStore may
+            // still be building its phone map, or waiting on the permission
+            // dialog) must be retried on a later poll, not skipped for the
+            // whole session. The provider call is an in-memory lookup, so
+            // retrying costs no HTTP.
+            guard name != nil || photoJPEG != nil else { continue }
+            pushedContactPhones.insert(phone)
+
+            var payload: [String: Any] = ["phone": phone]
+            if let name { payload["name"] = name }
+            if let photoJPEG { payload["photo_base64"] = photoJPEG.base64EncodedString() }
+
+            guard let url = URL(string: "\(config.apiEndpoint)/contacts"),
+                  let body = try? JSONSerialization.data(withJSONObject: payload) else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+
+            if let (_, response) = try? await session.data(for: request),
+               let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                crmLog("[CRM] pushContactInfo: sent \(phone) photo=\(photoJPEG != nil)")
+            } else {
+                // Retry on a later poll. Deliberate for transient failures
+                // (offline); a permanently-failing backend costs one small
+                // POST per synced phone per poll, accepted.
+                pushedContactPhones.remove(phone)
+            }
+        }
+    }
+
+    /// Watch chat.db for the just-sent message's delivery receipt or error
+    /// and upgrade the ack accordingly. No verdict within the window leaves
+    /// the command at "sent" — honest for plain SMS, which may never produce
+    /// a receipt; a receipt upgrades to "delivered"; a Messages error code
+    /// acks "failed" so the portal finally SHOWS undelivered sends.
+    private func verifyDeliveryAndAck(commandID: String, phone: String, afterRowID: Int64) {
+        guard let probe = deliveryProbe else { return }
+        Task.detached { [weak self] in
+            for _ in 0..<15 {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self else { return }
+                guard let state = probe(phone, afterRowID) else { continue }
+                if let verdict = MessageSender.deliveryAckStatus(
+                    errorCode: state.errorCode, delivered: state.delivered
+                ) {
+                    await self.acknowledge(commandID: commandID, status: verdict)
+                    crmLog("[CRM] deliveryVerify: cmd=\(commandID) → \(verdict)")
+                    return
+                }
+            }
+            crmLog("[CRM] deliveryVerify: cmd=\(commandID) no receipt in 30s — left as sent")
+        }
     }
 
     private func pushInbound() async {
@@ -154,15 +232,37 @@ final class CRMSyncService {
                       let phone = msg["phone"] as? String,
                       let text = msg["text"] as? String else { continue }
                 crmLog("[CRM] pullOutbound: sending cmd=\(cmdID) to=\(phone) text_len=\(text.count)")
-                let result = MessageSender.send(text: text, to: phone)
+                // A portal-initiated send may target a phone that was never
+                // opted in to sync; without opting it in here, the sent message
+                // and any reply never flow back to the backend.
+                // Mutate config on the main actor: updateConfig() writes from
+                // the settings UI there, and this is the only other writer.
+                if !config.syncedPhoneNumbers.contains(phone) {
+                    await MainActor.run {
+                        if !self.config.syncedPhoneNumbers.contains(phone) {
+                            self.config.syncedPhoneNumbers.insert(phone)
+                            self.config.save()
+                        }
+                    }
+                    crmLog("[CRM] pullOutbound: auto-enabled sync for new contact \(phone)")
+                }
+                let hint = chatServiceHint?(phone)
+                crmLog("[CRM] pullOutbound: service hint for \(phone) = \(hint ?? "nil")")
+                let preRowID = chatMaxRowID?() ?? 0
+                let result = MessageSender.send(text: text, to: phone, preferredService: hint)
                 let status: String
                 let sendSuccess: Bool
                 var sendError: String? = nil
                 switch result {
                 case .success:
-                    status = "delivered"
+                    // AppleScript success only means Messages ACCEPTED the
+                    // send — a stuck iMessage to a non-iMessage recipient
+                    // looks identical. Ack "sent" now; the real verdict
+                    // (delivered / failed) comes from chat.db's receipt and
+                    // error fields via the detached verifier below.
+                    status = "sent"
                     sendSuccess = true
-                    crmLog("[CRM] pullOutbound: delivered cmd=\(cmdID) to=\(phone)")
+                    crmLog("[CRM] pullOutbound: sent cmd=\(cmdID) to=\(phone), verifying delivery")
                 case .failure(let err):
                     status = "failed: \(err.localizedDescription)"
                     sendSuccess = false
@@ -179,6 +279,9 @@ final class CRMSyncService {
                 }
                 await acknowledge(commandID: cmdID, status: status)
                 crmLog("[CRM] pullOutbound: acked cmd=\(cmdID) status=\(status)")
+                if sendSuccess {
+                    verifyDeliveryAndAck(commandID: cmdID, phone: phone, afterRowID: preRowID)
+                }
             }
         } catch {
             crmLog("[CRM] pullOutbound: network error: \(error)")

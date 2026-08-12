@@ -23,7 +23,7 @@ export function DashboardPage() {
     <div className="p-6 max-w-3xl">
       <div className="flex items-center gap-2 mb-6">
         <Inbox size={24} />
-        <h1 className="text-xl font-semibold text-foreground">Inbox</h1>
+        <h1 className="font-brand text-xl font-semibold text-foreground">Inbox</h1>
       </div>
 
       {threads.length === 0 ? (

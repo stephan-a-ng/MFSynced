@@ -32,6 +32,21 @@ final class AppState {
         }
 
         crmService = CRMSyncService(config: crmConfig)
+        // Outbound service routing: prefer the service the chat already lives
+        // on (SMS threads -> the SMS-forwarding account, so Android
+        // recipients get the text immediately instead of a stuck iMessage).
+        crmService?.chatServiceHint = { [weak self] phone in
+            self?.chatDB.serviceForChat(identifier: phone)
+        }
+        crmService?.contactInfoProvider = { [weak self] phone in
+            self?.contactStore.contactInfo(for: phone) ?? (nil, nil)
+        }
+        crmService?.chatMaxRowID = { [weak self] in
+            (try? self?.chatDB.getMaxRowID()) ?? 0
+        }
+        crmService?.deliveryProbe = { [weak self] phone, afterRowID in
+            self?.chatDB.outgoingDeliveryState(identifier: phone, afterRowID: afterRowID)
+        }
         if crmConfig.isEnabled {
             crmService?.startPolling()
         }

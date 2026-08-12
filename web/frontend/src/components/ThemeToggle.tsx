@@ -27,7 +27,7 @@ export function ThemeToggle({ className }: { className?: string }) {
   return (
     <button
       onClick={toggleTheme}
-      className={`relative w-9 h-9 rounded-lg flex items-center justify-center transition-colors hover:bg-slate-100 dark:hover:bg-slate-700 ${className ?? ''}`}
+      className={`relative w-9 h-9 rounded-lg flex items-center justify-center transition-colors hover:bg-muted ${className ?? ''}`}
       aria-label={`Switch to ${isDark ? 'light' : 'dark'} mode`}
     >
       <motion.div
@@ -36,7 +36,7 @@ export function ThemeToggle({ className }: { className?: string }) {
         animate={{ scale: 1, opacity: 1 }}
         transition={{ duration: 0.2, ease: 'easeInOut' }}
       >
-        {isDark ? <Moon size={18} className="text-slate-300" /> : <Sun size={18} className="text-amber-500" />}
+        {isDark ? <Moon size={18} className="text-primary" /> : <Sun size={18} className="text-foreground" />}
       </motion.div>
     </button>
   );

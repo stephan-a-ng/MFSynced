@@ -1,12 +1,16 @@
+import { assetUrl } from '../api/client';
 import { useEffect, useState } from 'react';
-import { Smartphone, Forward, Loader2 } from 'lucide-react';
+import { Link } from 'react-router-dom';
+import { Smartphone, Forward, Loader2, Plus } from 'lucide-react';
 import { useConversationStore } from '../stores/conversationStore';
 import { ForwardDialog } from '../components/ForwardDialog';
+import { ComposeDialog } from '../components/ComposeDialog';
 import type { Conversation } from '../api/conversations';
 
 export function ConversationsPage() {
   const { conversations, loading, fetchConversations } = useConversationStore();
   const [forwardTarget, setForwardTarget] = useState<Conversation | null>(null);
+  const [composeOpen, setComposeOpen] = useState(false);
 
   useEffect(() => { fetchConversations(); }, []);
 
@@ -20,9 +24,18 @@ export function ConversationsPage() {
 
   return (
     <div className="p-6 max-w-3xl">
-      <div className="flex items-center gap-2 mb-6">
-        <Smartphone size={24} />
-        <h1 className="text-xl font-semibold text-foreground">My Conversations</h1>
+      <div className="flex items-center justify-between mb-6">
+        <div className="flex items-center gap-2">
+          <Smartphone size={24} />
+          <h1 className="font-brand text-xl font-semibold text-foreground">My Conversations</h1>
+        </div>
+        <button
+          onClick={() => setComposeOpen(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
+        >
+          <Plus size={14} />
+          New Message
+        </button>
       </div>
 
       {conversations.length === 0 ? (
@@ -30,7 +43,18 @@ export function ConversationsPage() {
       ) : (
         <div className="space-y-1">
           {conversations.map(c => (
-            <div key={`${c.phone}-${c.agent_id}`} className="flex items-center p-3 rounded-lg border border-border hover:bg-muted/50 transition-colors">
+            <Link
+              key={`${c.phone}-${c.agent_id}`}
+              to={`/conversations/${encodeURIComponent(c.phone)}?agent_id=${encodeURIComponent(c.agent_id)}`}
+              className="flex items-center p-3 rounded-lg border border-border hover:bg-muted/50 transition-colors"
+            >
+              {c.contact_photo_url && (
+                <img
+                  src={assetUrl(c.contact_photo_url)}
+                  alt=""
+                  className="w-9 h-9 rounded-full object-cover mr-3 flex-shrink-0"
+                />
+              )}
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-sm text-foreground">{c.contact_name || c.phone}</p>
                 {c.contact_name && <p className="text-xs text-muted-foreground">{c.phone}</p>}
@@ -42,13 +66,13 @@ export function ConversationsPage() {
                 </span>
               )}
               <button
-                onClick={() => setForwardTarget(c)}
+                onClick={(e) => { e.preventDefault(); e.stopPropagation(); setForwardTarget(c); }}
                 className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
               >
                 <Forward size={14} />
                 Forward
               </button>
-            </div>
+            </Link>
           ))}
         </div>
       )}
@@ -61,6 +85,10 @@ export function ConversationsPage() {
           onClose={() => setForwardTarget(null)}
           onForwarded={() => { setForwardTarget(null); alert('Thread forwarded!'); }}
         />
+      )}
+
+      {composeOpen && (
+        <ComposeDialog conversations={conversations} onClose={() => setComposeOpen(false)} />
       )}
     </div>
   );

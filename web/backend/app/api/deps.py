@@ -1,45 +1,37 @@
-from datetime import datetime, timedelta, timezone
-from typing import NamedTuple
 from uuid import UUID
 import hashlib
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
 import asyncpg
 
-from app.config import settings
 from app.db import get_db
+from app.shared.auth import verify_user_access_token
+from app.services.user_service import upsert_user_from_claims
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
-class TokenPayload(NamedTuple):
-    user_id: UUID
-    role: str
-
-def create_user_token(user_id: UUID, role: str = "member") -> str:
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": str(user_id),
-        "role": role,
-        "iat": now,
-        "exp": now + timedelta(hours=settings.JWT_EXPIRE_HOURS),
-    }
-    return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
-
 async def get_current_user_id(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    conn: asyncpg.Connection = Depends(get_db),
 ) -> UUID:
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    claims = await verify_user_access_token(credentials.credentials)
+
+    # Machine tokens (mf CLI service accounts, etc.) don't get to hit
+    # human-facing endpoints through this dependency — that's what
+    # require_agent_auth / the m2m path is for.
+    if claims.get("principal_type") == "service_account":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Service account tokens are not accepted here")
+
     try:
-        payload = jwt.decode(credentials.credentials, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
-        user_id = payload.get("sub")
-        if user_id is None:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-        return UUID(user_id)
-    except (JWTError, ValueError) as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token") from exc
+        user = await upsert_user_from_claims(conn, claims)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+    return UUID(str(user["id"]))
 
 async def require_agent_auth(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),

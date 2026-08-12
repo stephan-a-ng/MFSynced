@@ -13,14 +13,87 @@ Pre-requisites (one-time setup by a superuser):
 """
 import hashlib
 import secrets
+import time
 from pathlib import Path
+from unittest.mock import patch
 
 import asyncpg
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from httpx import ASGITransport, AsyncClient
+from jose import jwt as jose_jwt
 
-from app.api.deps import create_user_token
 from app.main import app
+
+# ---------------------------------------------------------------------------
+# user-access OIDC test doubles: session RSA keypair + fake JWKS.
+# The app verifies tokens against app.shared.auth's JWKS fetch; we patch that
+# fetch for the whole session and mint RS256 tokens with the test key.
+# ---------------------------------------------------------------------------
+
+TEST_ISSUER = "https://user-access-test.invalid"
+TEST_AUDIENCE = "message-test"
+TEST_KID = "conftest-key-1"
+
+_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+TEST_PRIVATE_PEM = _private_key.private_bytes(
+    serialization.Encoding.PEM,
+    serialization.PrivateFormat.PKCS8,
+    serialization.NoEncryption(),
+).decode()
+
+
+def _b64url_uint(n: int) -> str:
+    import base64
+
+    raw = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+_pub = _private_key.public_key().public_numbers()
+TEST_JWKS = {
+    "keys": [
+        {
+            "kty": "RSA",
+            "kid": TEST_KID,
+            "use": "sig",
+            "alg": "RS256",
+            "n": _b64url_uint(_pub.n),
+            "e": _b64url_uint(_pub.e),
+        }
+    ]
+}
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _uploads_tmp_dir(tmp_path_factory):
+    """Point UPLOAD_DIR at a session tmp dir - endpoint tests write real
+    files, which must never land in the repo's working tree."""
+    from app.config import settings
+
+    settings.UPLOAD_DIR = str(tmp_path_factory.mktemp("uploads"))
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _user_access_test_idp():
+    """Point the app's verifier at the test issuer/JWKS for the whole session."""
+    from app.config import settings
+    import app.shared.auth as ua_auth
+
+    settings.user_access_issuer = TEST_ISSUER
+    settings.user_access_jwks_url = f"{TEST_ISSUER}/.well-known/jwks.json"
+    settings.user_access_audience = TEST_AUDIENCE
+    settings.user_access_operator_audiences = ""
+
+    async def _fake_fetch_jwks():
+        return TEST_JWKS
+
+    ua_auth.clear_jwks_cache()
+    with patch.object(ua_auth, "_fetch_jwks", _fake_fetch_jwks):
+        yield
+    ua_auth.clear_jwks_cache()
 
 MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
 TEST_DB_URL = "postgresql://mfsynced:mfsynced@localhost:5432/mfsynced_test"
@@ -160,4 +233,23 @@ async def test_conversation(db_conn, test_agent) -> str:
 
 
 def make_token(user: dict) -> str:
-    return create_user_token(user["id"], user["role"])
+    """Mint a user-access-style RS256 token for a seeded user row.
+
+    The email claim links the token to the row via the upsert-by-email path,
+    so tests keep working with users inserted directly by fixtures.
+    """
+    now = int(time.time())
+    claims = {
+        "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "sub": user.get("user_access_sub") or f"test-sub-{user['email']}",
+        "email": user["email"],
+        "email_verified": True,
+        "name": user.get("name") or user["email"],
+        "app_role": user.get("role", "member"),
+        "iat": now,
+        "exp": now + 900,
+    }
+    return jose_jwt.encode(
+        claims, TEST_PRIVATE_PEM, algorithm="RS256", headers={"kid": TEST_KID}
+    )
