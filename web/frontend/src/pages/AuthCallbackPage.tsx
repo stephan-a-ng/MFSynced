@@ -54,7 +54,7 @@ export function AuthCallbackPage() {
   if (error) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
-        <div className="bg-card p-8 rounded-xl shadow-sm border border-border max-w-sm w-full text-center">
+        <div className="m5-glass p-8 rounded-xl shadow-sm max-w-sm w-full text-center">
           <p className="text-destructive mb-4">{error}</p>
           <a href="/login" className="text-primary hover:underline text-sm">Try again</a>
         </div>

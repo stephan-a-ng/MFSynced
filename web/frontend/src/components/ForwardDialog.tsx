@@ -49,7 +49,7 @@ export function ForwardDialog({ phone, agentId, contactName, onClose, onForwarde
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-card border border-border rounded-xl shadow-lg w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
+      <div className="m5-glass rounded-xl shadow-lg w-full max-w-md p-6" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h2 className="font-semibold text-foreground">Forward Thread</h2>
           <button onClick={onClose} className="text-muted-foreground hover:text-foreground">

@@ -64,7 +64,7 @@ function Layout({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-screen bg-background">
       {/* Sidebar */}
-      <div className="w-56 border-r border-border flex flex-col bg-card">
+      <div className="w-56 border-r border-border flex flex-col m5-glass">
         <nav className="flex-1 p-2 pt-3 space-y-1">
           {navItems.map(({ to, icon: Icon, label }) => (
             <NavLink
