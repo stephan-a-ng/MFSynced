@@ -136,10 +136,10 @@ export function MessageBubble({ message, onReact, onRetry }: Props) {
             <span
               className={`inline-block w-2 h-2 rounded-full ${
                 deliveryState === 'delivered'
-                  ? 'bg-green-500'
+                  ? 'bg-green-800 dark:bg-green-500'
                   : deliveryState === 'failed'
-                  ? 'bg-red-500'
-                  : 'bg-yellow-500 animate-pulse'
+                  ? 'bg-red-800 dark:bg-red-500'
+                  : 'bg-amber-700 animate-pulse'
               }`}
               title={
                 deliveryState === 'delivered'

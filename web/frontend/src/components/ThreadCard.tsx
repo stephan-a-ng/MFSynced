@@ -21,8 +21,8 @@ export function ThreadCard({ thread }: { thread: InboxThread }) {
             <span
               className={`text-xs px-2 py-0.5 rounded-full font-medium ${
                 thread.mode === 'action'
-                  ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
-                  : 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
+                  ? 'border border-amber-800/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+                  : 'border border-blue-800/40 bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
               }`}
             >
               {thread.mode === 'action' ? 'Action Needed' : 'FYI'}

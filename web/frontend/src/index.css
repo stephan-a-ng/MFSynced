@@ -3,13 +3,15 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /*
- * Moon Five brand (ported from deploy.moonfive.tech's console design system):
- *  - HEX Franklin (variable, vendored) — display font for identity titles
- *    (the wordmark, page titles), not body text.
- *  - Canon yellow oklch(0.84 0.16 90) — the single brand accent; primary
- *    actions and outgoing bubbles carry it with warm-ink text.
- *  - Warm near-black ink #1a1508 / warm cream #f2ead6 — deploy's ink pair;
- *    the dark plane is deploy's #171208 shell, not a blue-cast gray.
+ * Moon Five design language, ported from deploy.moonfive.tech's console:
+ *  - LIGHT: the canon-yellow field oklch(0.84 0.16 90) with warm-ink text
+ *    (#1a1508) and translucent white glass cards. Accent = ink (fills carry
+ *    yellow text) — deploy's light accent semantics.
+ *  - DARK: the warm near-black plane #171208, cream ink #f2ead6, canon
+ *    yellow as the accent with ink text.
+ *  - HEX Franklin — display face for identity titles (wordmark, page
+ *    titles). Archivo / Archivo Black — the sign-in surface's typeface.
+ *    Body text stays system-ui, matching deploy.
  */
 @font-face {
   font-family: "HEX Franklin";
@@ -17,25 +19,53 @@
   font-weight: 100 900;
   font-display: swap;
 }
+@font-face {
+  font-family: "Archivo";
+  src: url("/fonts/Archivo-Variable-latin.woff2") format("woff2");
+  font-weight: 100 900;
+  font-stretch: 100%;
+  font-display: swap;
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Archivo";
+  src: url("/fonts/Archivo-Variable-latin-ext.woff2") format("woff2");
+  font-weight: 100 900;
+  font-stretch: 100%;
+  font-display: swap;
+  unicode-range:
+    U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Archivo Black";
+  src: url("/fonts/ArchivoBlack-latin.woff2") format("woff2");
+  font-weight: 400;
+  font-display: swap;
+}
 
 @theme {
-  /* Light mode is the app's ORIGINAL neutral/blue palette by request —
-     only dark mode carries the deploy-console brand plane below. */
-  --color-background: oklch(1 0 0);
-  --color-foreground: oklch(0.145 0.004 285.82);
-  --color-card: oklch(1 0 0);
-  --color-card-foreground: oklch(0.145 0.004 285.82);
-  --color-primary: oklch(0.546 0.245 262.88);
-  --color-primary-foreground: oklch(0.985 0.002 247.86);
-  --color-muted: oklch(0.967 0.001 286.38);
-  --color-muted-foreground: oklch(0.556 0.014 285.94);
-  --color-border: oklch(0.922 0.004 286.32);
-  --color-input: oklch(0.922 0.004 286.32);
-  --color-ring: oklch(0.546 0.245 262.88);
-  --color-destructive: oklch(0.577 0.245 27.33);
-  --color-destructive-foreground: oklch(0.985 0.002 0);
+  /* LIGHT — deploy's light plane. */
+  --color-background: oklch(0.84 0.16 90);
+  --color-foreground: #1a1508;
+  --color-card: rgb(255 255 255 / 42%);
+  --color-card-foreground: #1a1508;
+  --color-primary: #1a1508;
+  --color-primary-foreground: oklch(0.84 0.16 90);
+  --color-muted: rgb(255 255 255 / 35%);
+  --color-muted-foreground: rgb(26 21 8 / 72%);
+  --color-border: rgb(26 21 8 / 14%);
+  --color-ring: #1a1508;
+  --color-destructive: #991b1b;
+  --color-destructive-foreground: #fef2f2;
 
   --font-brand: "HEX Franklin", ui-sans-serif, system-ui, sans-serif;
+  --font-archivo: "Archivo", Helvetica, Arial, sans-serif;
+  --font-archivo-black: "Archivo Black", "Archivo", Helvetica, sans-serif;
 
   --radius-lg: 0.5rem;
   --radius-md: calc(var(--radius-lg) - 2px);
@@ -46,26 +76,22 @@
 
 @layer base {
   .dark {
-    /* deploy's dark plane verbatim: warm near-black shell, cream ink,
-       canon-yellow accent with ink text. */
+    /* DARK — deploy's dark plane. */
     --color-background: #171208;
     --color-foreground: #f2ead6;
-    --color-card: #231c0e;
+    --color-card: rgb(255 255 255 / 7%);
     --color-card-foreground: #f2ead6;
     --color-primary: oklch(0.84 0.16 90);
     --color-primary-foreground: #1a1508;
     --color-muted: rgb(242 234 214 / 8%);
     --color-muted-foreground: rgb(242 234 214 / 62%);
     --color-border: rgb(242 234 214 / 16%);
-    --color-input: rgb(242 234 214 / 16%);
     --color-ring: oklch(0.84 0.16 90);
     --color-destructive: #fca5a5;
     --color-destructive-foreground: #1a1508;
   }
 
   html {
-    /* Native chrome (form popups, scrollbars) follows the theme; the toggle
-       flips color-scheme via the .dark block below. */
     color-scheme: light;
     scrollbar-color: rgb(26 21 8 / 20%) transparent;
     scrollbar-width: thin;
@@ -85,6 +111,26 @@
 .font-brand {
   font-family: var(--font-brand);
   letter-spacing: 0.01em;
+}
+.font-archivo {
+  font-family: var(--font-archivo);
+}
+
+/*
+ * The ONE glass (deploy's m5-atom-glass, token-driven): translucent card
+ * fill + backdrop blur + hairline. Reads as glass on the yellow field and
+ * on the dark plane without variant classes.
+ * Prefix first, standard last — Lightning CSS keeps only the last of the
+ * two spellings, so standard-first silently drops the non-WebKit one.
+ */
+.m5-glass {
+  background: var(--color-card);
+  -webkit-backdrop-filter: blur(22px);
+  backdrop-filter: blur(22px);
+  border: 1px solid rgb(255 255 255 / 45%);
+}
+.dark .m5-glass {
+  border-color: rgb(255 255 255 / 12%);
 }
 
 @keyframes fade-in {
