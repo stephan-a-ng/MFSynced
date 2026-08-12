@@ -1,7 +1,7 @@
 import { assetUrl } from '../api/client';
+import { FlowerSpinner } from '../components/brand/BrandLoader';
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
-import { Loader2 } from 'lucide-react';
 import { conversationsApi, type Message } from '../api/conversations';
 import { messagesApi } from '../api/messages';
 import { MessageBubble } from '../components/MessageBubble';
@@ -291,7 +291,7 @@ export function ConversationThreadPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <Loader2 size={24} className="animate-spin text-muted-foreground" />
+        <FlowerSpinner />
       </div>
     );
   }

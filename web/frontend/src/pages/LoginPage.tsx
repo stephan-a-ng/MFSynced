@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { FlowerMark } from '../components/brand/FlowerMark';
 import { useLocation } from 'react-router-dom';
 import { ThemeToggle } from '../components/ThemeToggle';
 import { initiateLogin } from '../shared/auth/oidc';
@@ -28,6 +29,7 @@ export function LoginPage() {
         <ThemeToggle />
       </div>
       <div className="m5-glass rounded-2xl shadow-lg p-8 max-w-sm w-full text-center animate-fade-in font-archivo">
+        <FlowerMark size="40px" fill="currentColor" autoplay className="mx-auto mb-3 h-10 w-10 flex-none text-foreground" />
         <h1 className="font-brand text-3xl font-extrabold text-foreground mb-2">MFSynced</h1>
         <p className="text-muted-foreground text-sm mb-1">Team iMessage Hub</p>
         <p className="text-muted-foreground text-xs mb-6">Sign in with your @moonfive.tech email</p>

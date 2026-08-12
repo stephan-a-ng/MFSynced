@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
-import { Inbox, Loader2 } from 'lucide-react';
+import { FlowerSpinner } from '../components/brand/BrandLoader';
+import { Inbox } from 'lucide-react';
 import { useInboxStore } from '../stores/inboxStore';
 import { ThreadCard } from '../components/ThreadCard';
 
@@ -14,7 +15,7 @@ export function DashboardPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <Loader2 size={24} className="animate-spin text-muted-foreground" />
+        <FlowerSpinner />
       </div>
     );
   }
