@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { FlowerSpinner } from '../components/brand/BrandLoader';
+import { BrandLoader } from '../components/brand/BrandLoader';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { completeLogin } from '../shared/auth/oidc';
 import { useAuthStore } from '../shared/auth/store';
@@ -62,12 +62,8 @@ export function AuthCallbackPage() {
     );
   }
 
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-background">
-      <div className="flex items-center gap-2 text-muted-foreground">
-        <FlowerSpinner size="20px" />
-        Signing in...
-      </div>
-    </div>
-  );
+  // Same full-screen brand loader AuthGuard shows during hydration, so the
+  // whole login flow reads as ONE continuous loading screen instead of a
+  // small card followed by a different full-screen bloom.
+  return <BrandLoader label="Signing in…" />;
 }

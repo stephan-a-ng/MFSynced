@@ -73,7 +73,7 @@ function Layout({ children }: { children: React.ReactNode }) {
               autoplay
               className="h-[26px] w-[26px] flex-none"
             />
-            <span className="font-brand">MFSynced</span>
+            <span className="font-brand">Message</span>
           </NavLink>
           <nav className="flex flex-wrap items-center gap-4 text-sm">
             {navItems.map(({ to, label }) => (
