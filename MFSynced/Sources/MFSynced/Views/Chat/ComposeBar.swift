@@ -56,7 +56,11 @@ struct ComposeBar: View {
     private func sendMessage() {
         let trimmed = text.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
-        MessageSender.send(text: trimmed, to: chatIdentifier)
+        // Route by the thread's actual service — an SMS/RCS (Android) chat
+        // must go through the SMS-forwarding account or the message sits
+        // undelivered on iMessage (same routing as the portal send path).
+        let hint = ChatDatabase().serviceForChat(identifier: chatIdentifier)
+        MessageSender.send(text: trimmed, to: chatIdentifier, preferredService: hint)
         text = ""
     }
 }
