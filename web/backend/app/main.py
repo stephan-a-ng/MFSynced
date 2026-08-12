@@ -1,3 +1,4 @@
+import os
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -88,5 +89,8 @@ app.include_router(inbox.router)
 app.include_router(upload.router)
 app.include_router(messages.router)
 
-# Serve uploaded files
+# Serve uploaded files. Create the dir if absent — StaticFiles refuses to
+# mount a missing directory, which breaks app import (and thus pytest and
+# the deploy gate) on any fresh checkout.
+os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")

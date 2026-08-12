@@ -24,8 +24,6 @@
 	<string>14.0</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
-	<key>NSAppleEventsUsageDescription</key>
-	<string>MFSynced sends iMessages on your behalf by controlling Messages.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>MFSynced uses your contacts to show names for iMessage conversations.</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
