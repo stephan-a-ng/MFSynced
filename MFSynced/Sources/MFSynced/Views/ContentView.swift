@@ -41,6 +41,12 @@ final class AppState {
         crmService?.contactInfoProvider = { [weak self] phone in
             self?.contactStore.contactInfo(for: phone) ?? (nil, nil)
         }
+        crmService?.chatMaxRowID = { [weak self] in
+            (try? self?.chatDB.getMaxRowID()) ?? 0
+        }
+        crmService?.deliveryProbe = { [weak self] phone, afterRowID in
+            self?.chatDB.outgoingDeliveryState(identifier: phone, afterRowID: afterRowID)
+        }
         if crmConfig.isEnabled {
             crmService?.startPolling()
         }

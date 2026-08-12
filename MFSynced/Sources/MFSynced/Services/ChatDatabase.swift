@@ -1,6 +1,13 @@
 import Foundation
 import SQLite3
 
+
+// sqlite must copy bound text: with the nil (SQLITE_STATIC) destructor the
+// temporary NSString buffer backing `utf8String` can be freed before
+// sqlite3_step, silently binding garbage. Field-observed: an exact-match
+// lookup returned nil for a row that exists.
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 final class ChatDatabase {
     private let path: String
 
@@ -68,7 +75,7 @@ final class ChatDatabase {
 
         sqlite3_bind_int64(stmt, 1, rowID)
         if let chatFilter {
-            sqlite3_bind_text(stmt, 2, (chatFilter as NSString).utf8String, -1, nil)
+            sqlite3_bind_text(stmt, 2, (chatFilter as NSString).utf8String, -1, SQLITE_TRANSIENT)
         }
         return parseMessageRows(stmt)
     }
@@ -104,7 +111,7 @@ final class ChatDatabase {
         defer { sqlite3_finalize(stmt) }
 
         var p: Int32 = 1
-        sqlite3_bind_text(stmt, p, (chatIdentifier as NSString).utf8String, -1, nil); p += 1
+        sqlite3_bind_text(stmt, p, (chatIdentifier as NSString).utf8String, -1, SQLITE_TRANSIENT); p += 1
         if let beforeRowID { sqlite3_bind_int64(stmt, p, beforeRowID); p += 1 }
         sqlite3_bind_int(stmt, p, Int32(limit))
 
@@ -119,11 +126,52 @@ final class ChatDatabase {
         guard let db = try? openConnection() else { return nil }
         defer { sqlite3_close(db) }
 
-        let sql = "SELECT service_name FROM chat WHERE chat_identifier = ? LIMIT 1"
+        if let service = queryService(db, sql: "SELECT service_name FROM chat WHERE chat_identifier = ? LIMIT 1", bind: identifier) {
+            return service
+        }
+        // Formats drift between the portal's normalized E.164 and Apple's
+        // chat_identifier; fall back to matching on the last 10 digits.
+        let digits = identifier.filter { $0.isNumber }
+        guard digits.count >= 10 else { return nil }
+        return queryService(
+            db,
+            sql: "SELECT service_name FROM chat WHERE chat_identifier LIKE ? LIMIT 1",
+            bind: "%" + String(digits.suffix(10))
+        )
+    }
+
+    /// Delivery state of the FIRST outgoing message that appeared in this
+    /// chat after `afterRowID` — the message a send just created. Returns
+    /// nil until Messages writes the row.
+    func outgoingDeliveryState(identifier: String, afterRowID: Int64) -> (delivered: Bool, errorCode: Int)? {
+        guard let db = try? openConnection() else { return nil }
+        defer { sqlite3_close(db) }
+
+        let digits = identifier.filter { $0.isNumber }
+        let suffix = digits.count >= 10 ? String(digits.suffix(10)) : digits
+        let sql = """
+            SELECT m.is_delivered, m.error FROM message m
+            JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+            JOIN chat c ON cmj.chat_id = c.ROWID
+            WHERE (c.chat_identifier = ? OR c.chat_identifier LIKE ?)
+              AND m.is_from_me = 1 AND m.ROWID > ?
+            ORDER BY m.ROWID ASC LIMIT 1
+            """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, (identifier as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 1, (identifier as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, (("%" + suffix) as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int64(stmt, 3, afterRowID)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return (sqlite3_column_int(stmt, 0) == 1, Int(sqlite3_column_int(stmt, 1)))
+    }
+
+    private func queryService(_ db: OpaquePointer, sql: String, bind: String) -> String? {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (bind as NSString).utf8String, -1, SQLITE_TRANSIENT)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return columnText(stmt, 0)
     }
@@ -191,7 +239,7 @@ final class ChatDatabase {
         defer { sqlite3_finalize(stmt) }
 
         let pattern = "%\(query)%"
-        sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1, nil)
+        sqlite3_bind_text(stmt, 1, (pattern as NSString).utf8String, -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(stmt, 2, Int32(limit))
         return parseMessageRows(stmt)
     }
