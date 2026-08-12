@@ -46,6 +46,15 @@ enum MessageSender {
         return ["SMS", "iMessage"]
     }
 
+    /// Map the just-sent message's chat.db state to the backend ack.
+    /// nil = no verdict yet (no receipt is NOT failure: plain SMS often
+    /// never produces one) — caller keeps polling or leaves "sent".
+    static func deliveryAckStatus(errorCode: Int, delivered: Bool) -> String? {
+        if errorCode != 0 { return "failed: Messages reported send error \(errorCode)" }
+        if delivered { return "delivered" }
+        return nil
+    }
+
     @discardableResult
     static func send(
         text: String, to recipient: String, preferredService: String? = nil

@@ -46,6 +46,12 @@ final class CRMSyncService {
     /// sends target the right account. Injected (ChatDatabase-backed) so the
     /// sync service stays testable without a live chat.db.
     var chatServiceHint: ((String) -> String?)?
+    /// chat.db's current max message ROWID — watermark taken just before a
+    /// send so the verifier can find the row that send created.
+    var chatMaxRowID: (() -> Int64)?
+    /// Delivery state (receipt + error code) of the first outgoing message
+    /// after a watermark; nil until Messages writes the row.
+    var deliveryProbe: ((String, Int64) -> (delivered: Bool, errorCode: Int)?)?
     private var pollTimer: Timer?
     private let session = URLSession.shared
 
@@ -93,6 +99,30 @@ final class CRMSyncService {
         await pushInbound()
         await pullOutbound()
         await updateCounts()
+    }
+
+    /// Watch chat.db for the just-sent message's delivery receipt or error
+    /// and upgrade the ack accordingly. No verdict within the window leaves
+    /// the command at "sent" — honest for plain SMS, which may never produce
+    /// a receipt; a receipt upgrades to "delivered"; a Messages error code
+    /// acks "failed" so the portal finally SHOWS undelivered sends.
+    private func verifyDeliveryAndAck(commandID: String, phone: String, afterRowID: Int64) {
+        guard let probe = deliveryProbe else { return }
+        Task.detached { [weak self] in
+            for _ in 0..<15 {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard let self else { return }
+                guard let state = probe(phone, afterRowID) else { continue }
+                if let verdict = MessageSender.deliveryAckStatus(
+                    errorCode: state.errorCode, delivered: state.delivered
+                ) {
+                    await self.acknowledge(commandID: commandID, status: verdict)
+                    crmLog("[CRM] deliveryVerify: cmd=\(commandID) → \(verdict)")
+                    return
+                }
+            }
+            crmLog("[CRM] deliveryVerify: cmd=\(commandID) no receipt in 30s — left as sent")
+        }
     }
 
     private func pushInbound() async {
@@ -174,15 +204,21 @@ final class CRMSyncService {
                 }
                 let hint = chatServiceHint?(phone)
                 crmLog("[CRM] pullOutbound: service hint for \(phone) = \(hint ?? "nil")")
+                let preRowID = chatMaxRowID?() ?? 0
                 let result = MessageSender.send(text: text, to: phone, preferredService: hint)
                 let status: String
                 let sendSuccess: Bool
                 var sendError: String? = nil
                 switch result {
                 case .success:
-                    status = "delivered"
+                    // AppleScript success only means Messages ACCEPTED the
+                    // send — a stuck iMessage to a non-iMessage recipient
+                    // looks identical. Ack "sent" now; the real verdict
+                    // (delivered / failed) comes from chat.db's receipt and
+                    // error fields via the detached verifier below.
+                    status = "sent"
                     sendSuccess = true
-                    crmLog("[CRM] pullOutbound: delivered cmd=\(cmdID) to=\(phone)")
+                    crmLog("[CRM] pullOutbound: sent cmd=\(cmdID) to=\(phone), verifying delivery")
                 case .failure(let err):
                     status = "failed: \(err.localizedDescription)"
                     sendSuccess = false
@@ -199,6 +235,9 @@ final class CRMSyncService {
                 }
                 await acknowledge(commandID: cmdID, status: status)
                 crmLog("[CRM] pullOutbound: acked cmd=\(cmdID) status=\(status)")
+                if sendSuccess {
+                    verifyDeliveryAndAck(commandID: cmdID, phone: phone, afterRowID: preRowID)
+                }
             }
         } catch {
             crmLog("[CRM] pullOutbound: network error: \(error)")

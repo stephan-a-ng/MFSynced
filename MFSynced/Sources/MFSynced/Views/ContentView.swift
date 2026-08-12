@@ -38,6 +38,12 @@ final class AppState {
         crmService?.chatServiceHint = { [weak self] phone in
             self?.chatDB.serviceForChat(identifier: phone)
         }
+        crmService?.chatMaxRowID = { [weak self] in
+            (try? self?.chatDB.getMaxRowID()) ?? 0
+        }
+        crmService?.deliveryProbe = { [weak self] phone, afterRowID in
+            self?.chatDB.outgoingDeliveryState(identifier: phone, afterRowID: afterRowID)
+        }
         if crmConfig.isEnabled {
             crmService?.startPolling()
         }
