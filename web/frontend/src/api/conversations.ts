@@ -4,6 +4,7 @@ export interface Conversation {
   phone: string;
   agent_id: string;
   contact_name: string | null;
+  contact_photo_url: string | null;
   last_message_at: string | null;
   message_count: number;
 }

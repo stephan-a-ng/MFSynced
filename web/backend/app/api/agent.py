@@ -1,9 +1,13 @@
+import base64
+import binascii
+import hashlib
 import logging
 import uuid as _uuid
 from pathlib import Path
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 import asyncpg
 
 from app.api.deps import get_current_user_id, require_agent_auth, get_db
@@ -18,6 +22,7 @@ from app.schemas.agent import (
     AgentForwardRequest,
 )
 from app.services.agent_service import register_agent
+from app.services.phone import normalize_phone
 from app.services.message_service import store_inbound_messages, store_inbound_reactions
 from app.services.outbound_service import fetch_pending_commands, acknowledge_command
 
@@ -170,6 +175,58 @@ async def forward_thread_from_agent(
         )
 
     return {"thread_id": str(thread["id"])}
+
+
+class ContactPush(BaseModel):
+    phone: str
+    name: str | None = None
+    photo_base64: str | None = Field(default=None, max_length=1_500_000)
+
+
+MAX_CONTACT_PHOTO_BYTES = 512 * 1024
+
+
+@router.post("/contacts")
+async def push_contact(
+    body: ContactPush,
+    agent: dict = Depends(require_agent_auth),
+    conn: asyncpg.Connection = Depends(get_db),
+) -> dict:
+    """Store a contact's display name and photo on its conversation row.
+
+    The Mac app pushes CNContactStore data here so the web console can show
+    real avatars. Photo storage shares the uploads dir (same accepted
+    ephemerality as attachments; the app re-pushes on every launch).
+    """
+    try:
+        phone = normalize_phone(body.phone)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Unparseable phone")
+
+    photo_url: str | None = None
+    if body.photo_base64:
+        try:
+            photo = base64.b64decode(body.photo_base64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=400, detail="Invalid photo_base64")
+        if len(photo) > MAX_CONTACT_PHOTO_BYTES:
+            raise HTTPException(status_code=400, detail="Photo too large (max 512KB)")
+        upload_dir = Path(settings.UPLOAD_DIR)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(photo).hexdigest()[:16]
+        filename = f"contact_{agent['id']}_{digest}.jpg"
+        (upload_dir / filename).write_bytes(photo)
+        photo_url = f"/uploads/{filename}"
+
+    await conn.execute(
+        """INSERT INTO conversations (phone, agent_id, contact_name, contact_photo_url)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (phone, agent_id) DO UPDATE SET
+             contact_name = COALESCE(EXCLUDED.contact_name, conversations.contact_name),
+             contact_photo_url = COALESCE(EXCLUDED.contact_photo_url, conversations.contact_photo_url)""",
+        phone, agent["id"], body.name, photo_url,
+    )
+    return {"phone": phone, "photo_url": photo_url}
 
 
 async def _save_upload(file: UploadFile) -> dict:

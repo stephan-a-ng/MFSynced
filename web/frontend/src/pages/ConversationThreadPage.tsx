@@ -1,3 +1,4 @@
+import { assetUrl } from '../api/client';
 import { useEffect, useRef, useState } from 'react';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
@@ -137,6 +138,7 @@ export function ConversationThreadPage() {
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [contactName, setContactName] = useState<string | null>(null);
+  const [contactPhoto, setContactPhoto] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingSend[]>([]);
   const [loading, setLoading] = useState(true);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -154,6 +156,7 @@ export function ConversationThreadPage() {
       .then(list => {
         const match = list.find(c => c.phone === phone && (!agentId || c.agent_id === agentId));
         setContactName(match?.contact_name ?? null);
+        setContactPhoto(match?.contact_photo_url ?? null);
       })
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -312,12 +315,21 @@ export function ConversationThreadPage() {
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="border-b border-border px-4 py-3 flex flex-col items-center gap-1 flex-shrink-0">
-        <div
-          style={{ width: 48, height: 48, background: bg, color: fg, fontSize: 18 }}
-          className="rounded-full flex items-center justify-center font-semibold select-none"
-        >
-          {initials(name)}
-        </div>
+        {contactPhoto ? (
+          <img
+            src={assetUrl(contactPhoto)}
+            alt=""
+            style={{ width: 48, height: 48 }}
+            className="rounded-full object-cover select-none"
+          />
+        ) : (
+          <div
+            style={{ width: 48, height: 48, background: bg, color: fg, fontSize: 18 }}
+            className="rounded-full flex items-center justify-center font-semibold select-none"
+          >
+            {initials(name)}
+          </div>
+        )}
         <div className="text-center">
           <h2 className="text-[14px] font-semibold text-foreground leading-snug">{name}</h2>
           {contactName && <p className="text-[11px] text-muted-foreground">{phone}</p>}

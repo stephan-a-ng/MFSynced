@@ -1,3 +1,4 @@
+import { assetUrl } from '../api/client';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Smartphone, Forward, Loader2, Plus } from 'lucide-react';
@@ -47,6 +48,13 @@ export function ConversationsPage() {
               to={`/conversations/${encodeURIComponent(c.phone)}?agent_id=${encodeURIComponent(c.agent_id)}`}
               className="flex items-center p-3 rounded-lg border border-border hover:bg-muted/50 transition-colors"
             >
+              {c.contact_photo_url && (
+                <img
+                  src={assetUrl(c.contact_photo_url)}
+                  alt=""
+                  className="w-9 h-9 rounded-full object-cover mr-3 flex-shrink-0"
+                />
+              )}
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-sm text-foreground">{c.contact_name || c.phone}</p>
                 {c.contact_name && <p className="text-xs text-muted-foreground">{c.phone}</p>}
