@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
+import { FlowerSpinner } from '../components/brand/BrandLoader';
 import { Outlet, NavLink, useParams, useNavigate } from 'react-router-dom';
-import { Loader2, Archive } from 'lucide-react';
+import { Archive } from 'lucide-react';
 import { useInboxStore } from '../stores/inboxStore';
 import type { InboxThread } from '../api/inbox';
 
@@ -108,7 +109,7 @@ export function InboxLayout() {
 
         <div className="flex-1 overflow-y-auto py-1">
           {loading ? (
-            <div className="flex justify-center pt-8"><Loader2 size={20} className="animate-spin text-muted-foreground" /></div>
+            <div className="flex justify-center pt-8"><FlowerSpinner /></div>
           ) : threads.length === 0 ? (
             <p className="text-xs text-muted-foreground text-center pt-8 px-4">No forwarded threads yet.</p>
           ) : (

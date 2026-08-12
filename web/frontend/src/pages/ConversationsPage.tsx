@@ -1,7 +1,8 @@
 import { assetUrl } from '../api/client';
+import { FlowerSpinner } from '../components/brand/BrandLoader';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Smartphone, Forward, Loader2, Plus } from 'lucide-react';
+import { Smartphone, Forward, Plus } from 'lucide-react';
 import { useConversationStore } from '../stores/conversationStore';
 import { ForwardDialog } from '../components/ForwardDialog';
 import { ComposeDialog } from '../components/ComposeDialog';
@@ -17,7 +18,7 @@ export function ConversationsPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <Loader2 size={24} className="animate-spin text-muted-foreground" />
+        <FlowerSpinner />
       </div>
     );
   }

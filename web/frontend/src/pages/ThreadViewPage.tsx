@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from 'react';
+import { FlowerSpinner } from '../components/brand/BrandLoader';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Loader2, Info, Archive } from 'lucide-react';
+import { Info, Archive } from 'lucide-react';
 import { inboxApi, type ThreadDetail } from '../api/inbox';
 import { useInboxStore } from '../stores/inboxStore';
 import { MessageBubble } from '../components/MessageBubble';
@@ -142,7 +143,7 @@ export function ThreadViewPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <Loader2 size={24} className="animate-spin text-muted-foreground" />
+        <FlowerSpinner />
       </div>
     );
   }

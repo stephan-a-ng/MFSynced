@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
+import { FlowerSpinner } from '../components/brand/BrandLoader';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Loader2 } from 'lucide-react';
 import { completeLogin } from '../shared/auth/oidc';
 import { useAuthStore } from '../shared/auth/store';
 
@@ -65,7 +65,7 @@ export function AuthCallbackPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-background">
       <div className="flex items-center gap-2 text-muted-foreground">
-        <Loader2 size={20} className="animate-spin" />
+        <FlowerSpinner size="20px" />
         Signing in...
       </div>
     </div>

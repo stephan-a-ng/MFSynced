@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, NavLink, useLocation, useNavigate } from 'react-router-dom';
-import { Inbox, Smartphone, LogOut, Loader2 } from 'lucide-react';
+import { LogOut } from 'lucide-react';
 import { useAuthStore } from './shared/auth/store';
 import { startProactiveRefresh } from './shared/auth/scheduler';
 import { ThemeToggle } from './components/ThemeToggle';
+import { FlowerMark } from './components/brand/FlowerMark';
+import { BrandLoader } from './components/brand/BrandLoader';
 import { LoginPage } from './pages/LoginPage';
 import { AuthCallbackPage } from './pages/AuthCallbackPage';
 import { DashboardPage } from './pages/DashboardPage';
@@ -34,11 +36,7 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   }, []);
 
   if (hydrating) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background">
-        <Loader2 size={24} className="animate-spin text-muted-foreground" />
-      </div>
-    );
+    return <BrandLoader />;
   }
 
   if (!accessToken || !user) {
@@ -57,45 +55,48 @@ function Layout({ children }: { children: React.ReactNode }) {
   };
 
   const navItems = [
-    { to: '/', icon: Inbox, label: 'Inbox' },
-    { to: '/conversations', icon: Smartphone, label: 'Conversations' },
+    { to: '/', label: 'Inbox' },
+    { to: '/conversations', label: 'Conversations' },
   ];
 
   return (
-    <div className="flex h-screen bg-background">
-      {/* Sidebar */}
-      <div className="w-56 border-r border-border flex flex-col m5-glass">
-        <nav className="flex-1 p-2 pt-3 space-y-1">
-          {navItems.map(({ to, icon: Icon, label }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === '/'}
-              className={({ isActive }) =>
-                `flex items-center gap-2 px-3 py-2 rounded-md text-sm transition-colors ${
+    <div className="min-h-screen h-screen flex flex-col bg-background text-foreground">
+      {/* Deploy's shell: a pinned, opaque top bar — mark + wordmark, inline
+          text nav, user/actions on the right. Opaque on purpose: nothing may
+          read through the nav as content scrolls beneath it. */}
+      <header className="sticky top-0 z-30 border-b border-border bg-background">
+        <div className="w-full px-6 sm:px-11 flex flex-wrap items-center gap-x-6 gap-y-2 py-3 sm:gap-x-8">
+          <NavLink to="/" className="flex items-center gap-2.5 font-semibold text-foreground">
+            <FlowerMark
+              size="26px"
+              fill="currentColor"
+              autoplay
+              className="h-[26px] w-[26px] flex-none"
+            />
+            <span className="font-brand">MFSynced</span>
+          </NavLink>
+          <nav className="flex flex-wrap items-center gap-4 text-sm">
+            {navItems.map(({ to, label }) => (
+              <NavLink
+                key={to}
+                to={to}
+                end={to === '/'}
+                className={({ isActive }) =>
                   isActive
-                    ? 'bg-primary/10 text-primary font-medium'
-                    : 'text-muted-foreground hover:bg-muted hover:text-foreground'
-                }`
-              }
-            >
-              <Icon size={18} />
-              {label}
-            </NavLink>
-          ))}
-        </nav>
-
-        <div className="p-3 border-t border-border space-y-2">
-          <div className="flex items-center gap-2">
-            {user?.picture && (
-              <img src={user.picture} alt="" className="w-7 h-7 rounded-full" />
+                    ? 'text-foreground font-medium'
+                    : 'text-muted-foreground hover:text-foreground'
+                }
+              >
+                {label}
+              </NavLink>
+            ))}
+          </nav>
+          <div className="ml-auto min-w-0 flex items-center gap-2 text-sm sm:gap-4">
+            {user?.email && (
+              <span className="hidden max-w-48 truncate text-muted-foreground sm:block">
+                {user.email}
+              </span>
             )}
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-medium text-foreground truncate">{user?.name}</p>
-              <p className="text-xs text-muted-foreground truncate">{user?.email}</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-1">
             <ThemeToggle />
             <button
               onClick={handleLogout}
@@ -106,12 +107,12 @@ function Layout({ children }: { children: React.ReactNode }) {
             </button>
           </div>
         </div>
-      </div>
+      </header>
 
       {/* Main content */}
-      <div className="flex-1 overflow-auto">
+      <main className="flex-1 min-h-0 overflow-auto">
         {children}
-      </div>
+      </main>
     </div>
   );
 }
