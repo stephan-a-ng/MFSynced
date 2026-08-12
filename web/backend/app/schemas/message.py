@@ -26,5 +26,6 @@ class ConversationResponse(BaseModel):
     phone: str
     agent_id: UUID
     contact_name: Optional[str] = None
+    contact_photo_url: Optional[str] = None
     last_message_at: Optional[datetime] = None
     message_count: int = 0

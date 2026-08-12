@@ -84,3 +84,11 @@ export const api = {
     return res.json();
   },
 };
+
+/** Prefix a backend-relative asset path (e.g. /uploads/...) with the API
+ * origin. nginx only proxies /v1 and /ws, so relative asset URLs 404 (or
+ * worse, return index.html) on the deployed frontend origin. */
+export function assetUrl(path: string): string {
+  if (/^https?:\/\//.test(path)) return path;
+  return `${import.meta.env.VITE_API_URL || ''}${path}`;
+}

@@ -38,6 +38,9 @@ final class AppState {
         crmService?.chatServiceHint = { [weak self] phone in
             self?.chatDB.serviceForChat(identifier: phone)
         }
+        crmService?.contactInfoProvider = { [weak self] phone in
+            self?.contactStore.contactInfo(for: phone) ?? (nil, nil)
+        }
         crmService?.chatMaxRowID = { [weak self] in
             (try? self?.chatDB.getMaxRowID()) ?? 0
         }

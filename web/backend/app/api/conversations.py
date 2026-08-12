@@ -15,7 +15,7 @@ async def list_conversations(
 ) -> list[ConversationResponse]:
     """List all conversations for agents owned by the current user."""
     rows = await conn.fetch(
-        """SELECT c.phone, c.agent_id, c.contact_name, c.last_message_at, c.message_count
+        """SELECT c.phone, c.agent_id, c.contact_name, c.contact_photo_url, c.last_message_at, c.message_count
            FROM conversations c
            JOIN agents a ON c.agent_id = a.id
            WHERE a.user_id = $1

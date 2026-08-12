@@ -46,6 +46,10 @@ final class CRMSyncService {
     /// sends target the right account. Injected (ChatDatabase-backed) so the
     /// sync service stays testable without a live chat.db.
     var chatServiceHint: ((String) -> String?)?
+    /// CNContactStore name + JPEG for a phone; injected like chatServiceHint.
+    var contactInfoProvider: ((String) -> (name: String?, photoJPEG: Data?))?
+    // Internal (not private) for test visibility of retry semantics.
+    var pushedContactPhones = Set<String>()
     /// chat.db's current max message ROWID — watermark taken just before a
     /// send so the verifier can find the row that send created.
     var chatMaxRowID: (() -> Int64)?
@@ -98,7 +102,47 @@ final class CRMSyncService {
         crmLog("[CRM] poll() called")
         await pushInbound()
         await pullOutbound()
+        await pushContactInfo()
         await updateCounts()
+    }
+
+    /// Push CNContactStore name+photo for synced phones the backend hasn't
+    /// been given yet this app session. Once per phone per launch: uploads
+    /// are ephemeral on the backend, so each launch re-heals the avatars.
+    func pushContactInfo() async {
+        guard let provider = contactInfoProvider else { return }
+        for phone in config.syncedPhoneNumbers where !pushedContactPhones.contains(phone) {
+            let (name, photoJPEG) = provider(phone)
+            // Not marked pushed yet: an unresolved contact (ContactStore may
+            // still be building its phone map, or waiting on the permission
+            // dialog) must be retried on a later poll, not skipped for the
+            // whole session. The provider call is an in-memory lookup, so
+            // retrying costs no HTTP.
+            guard name != nil || photoJPEG != nil else { continue }
+            pushedContactPhones.insert(phone)
+
+            var payload: [String: Any] = ["phone": phone]
+            if let name { payload["name"] = name }
+            if let photoJPEG { payload["photo_base64"] = photoJPEG.base64EncodedString() }
+
+            guard let url = URL(string: "\(config.apiEndpoint)/contacts"),
+                  let body = try? JSONSerialization.data(withJSONObject: payload) else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+
+            if let (_, response) = try? await session.data(for: request),
+               let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                crmLog("[CRM] pushContactInfo: sent \(phone) photo=\(photoJPEG != nil)")
+            } else {
+                // Retry on a later poll. Deliberate for transient failures
+                // (offline); a permanently-failing backend costs one small
+                // POST per synced phone per poll, accepted.
+                pushedContactPhones.remove(phone)
+            }
+        }
     }
 
     /// Watch chat.db for the just-sent message's delivery receipt or error

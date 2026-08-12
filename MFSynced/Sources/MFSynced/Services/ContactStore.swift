@@ -38,6 +38,19 @@ final class ContactStore {
         return contact
     }
 
+    /// Name + a small JPEG of the contact's photo for backend sync, or nils
+    /// when the contact/photo is unknown. The thumbnail CNContactStore hands
+    /// back is already small; re-encode caps it for the upload path.
+    func contactInfo(for identifier: String) -> (name: String?, photoJPEG: Data?) {
+        let resolved = contact(for: identifier)
+        guard let photo = resolved.photo else { return (resolved.fullName, nil) }
+        guard let tiff = photo.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff),
+              let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.8])
+        else { return (resolved.fullName, nil) }
+        return (resolved.fullName, jpeg)
+    }
+
     func requestAccess() async -> Bool {
         do {
             let granted = try await store.requestAccess(for: .contacts)

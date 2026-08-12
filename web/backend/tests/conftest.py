@@ -67,6 +67,16 @@ TEST_JWKS = {
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _uploads_tmp_dir(tmp_path_factory):
+    """Point UPLOAD_DIR at a session tmp dir - endpoint tests write real
+    files, which must never land in the repo's working tree."""
+    from app.config import settings
+
+    settings.UPLOAD_DIR = str(tmp_path_factory.mktemp("uploads"))
+    yield
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _user_access_test_idp():
     """Point the app's verifier at the test issuer/JWKS for the whole session."""
     from app.config import settings
