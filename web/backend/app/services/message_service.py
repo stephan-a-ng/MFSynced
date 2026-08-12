@@ -4,7 +4,16 @@ from uuid import UUID
 
 import asyncpg
 
+from app.services.phone import normalize_phone
+
 logger = logging.getLogger(__name__)
+
+def _safe_normalize(raw: str) -> str:
+    try:
+        return normalize_phone(raw)
+    except ValueError:
+        return raw
+
 
 async def store_inbound_messages(
     conn: asyncpg.Connection,
@@ -22,7 +31,15 @@ async def store_inbound_messages(
             except (ValueError, AttributeError):
                 timestamp = datetime.utcnow()
 
-            phone = msg.get("phone", "")
+            # Normalize to the same canonical form the send API uses so a
+            # portal-initiated conversation and the Mac's inbound sync land on
+            # one (phone, agent_id) key instead of fragmenting the thread.
+            # Fail open on unparseable identifiers (group chats, odd handles).
+            raw_phone = msg.get("phone", "")
+            try:
+                phone = normalize_phone(raw_phone)
+            except ValueError:
+                phone = raw_phone
             guid = msg.get("id", "")
 
             # Insert message (idempotent via ON CONFLICT)
@@ -77,7 +94,7 @@ async def store_inbound_messages(
             logger.error("Failed to store message %s: %s", msg.get("id"), e)
 
     # Unarchive threads for all recipients when a new inbound message arrives
-    seen_phones = {(m.get("phone", ""), str(agent_id)) for m in messages if not m.get("is_from_me", False)}
+    seen_phones = {(_safe_normalize(m.get("phone", "")), str(agent_id)) for m in messages if not m.get("is_from_me", False)}
     for phone, _ in seen_phones:
         if phone:
             await conn.execute(
