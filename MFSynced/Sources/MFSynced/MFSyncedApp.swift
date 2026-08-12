@@ -8,6 +8,9 @@ struct MFSyncedApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                // Blank the window title: SwiftUI otherwise paints the app
+                // name ("MFSynced") into the detail toolbar, wasting space.
+                .navigationTitle("")
         }
         .windowStyle(.titleBar)
         .defaultSize(width: 900, height: 600)

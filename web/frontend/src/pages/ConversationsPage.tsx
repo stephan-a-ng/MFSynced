@@ -27,7 +27,7 @@ export function ConversationsPage() {
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-2">
           <Smartphone size={24} />
-          <h1 className="text-xl font-semibold text-foreground">My Conversations</h1>
+          <h1 className="font-brand text-xl font-semibold text-foreground">My Conversations</h1>
         </div>
         <button
           onClick={() => setComposeOpen(true)}

@@ -65,14 +65,7 @@ function Layout({ children }: { children: React.ReactNode }) {
     <div className="flex h-screen bg-background">
       {/* Sidebar */}
       <div className="w-56 border-r border-border flex flex-col bg-card">
-        <div className="p-4 border-b border-border">
-          <div className="flex items-center gap-2">
-            <h1 className="font-bold text-lg text-foreground">MFSynced</h1>
-          </div>
-          <p className="text-xs text-muted-foreground">Team iMessage Hub</p>
-        </div>
-
-        <nav className="flex-1 p-2 space-y-1">
+        <nav className="flex-1 p-2 pt-3 space-y-1">
           {navItems.map(({ to, icon: Icon, label }) => (
             <NavLink
               key={to}
@@ -106,7 +99,7 @@ function Layout({ children }: { children: React.ReactNode }) {
             <ThemeToggle />
             <button
               onClick={handleLogout}
-              className="w-9 h-9 rounded-lg flex items-center justify-center transition-colors hover:bg-slate-100 dark:hover:bg-slate-700"
+              className="w-9 h-9 rounded-lg flex items-center justify-center transition-colors hover:bg-muted"
               aria-label="Sign out"
             >
               <LogOut size={18} className="text-muted-foreground" />
