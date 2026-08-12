@@ -1,3 +1,5 @@
+import { useAuthStore } from '../shared/auth/store';
+
 const BASE_URL = `${import.meta.env.VITE_API_URL || ''}/v1`;
 
 export class ApiError extends Error {
@@ -8,16 +10,36 @@ export class ApiError extends Error {
   }
 }
 
+function authHeader(): Record<string, string> {
+  const { accessToken } = useAuthStore.getState();
+  return accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const token = localStorage.getItem('token');
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
     ...(options.headers as Record<string, string> || {}),
   };
 
-  const res = await fetch(`${BASE_URL}${path}`, { ...options, headers });
+  let res = await fetch(`${BASE_URL}${path}`, { ...options, headers: { ...headers, ...authHeader() } });
+
+  if (res.status === 401) {
+    // Single retry: refresh the access token once, then replay the request.
+    // If the refresh itself fails (no/expired refresh token, revoked family),
+    // refresh() already calls logout() — the store's accessToken/user go
+    // null, and AuthGuard reacts to that by redirecting to /login.
+    try {
+      await useAuthStore.getState().refresh();
+      res = await fetch(`${BASE_URL}${path}`, { ...options, headers: { ...headers, ...authHeader() } });
+    } catch {
+      useAuthStore.getState().logout();
+    }
+  }
+
   if (!res.ok) {
+    if (res.status === 401) {
+      useAuthStore.getState().logout();
+    }
     const text = await res.text();
     throw new ApiError(res.status, `${res.status}: ${text}`);
   }
@@ -32,15 +54,30 @@ export const api = {
   put: <T>(path: string, body: unknown) => request<T>(path, { method: 'PUT', body: JSON.stringify(body) }),
   delete: (path: string) => request<void>(path, { method: 'DELETE' }),
   upload: async (file: File): Promise<{ url: string }> => {
-    const token = localStorage.getItem('token');
     const formData = new FormData();
     formData.append('file', file);
-    const res = await fetch(`${BASE_URL}/upload`, {
-      method: 'POST',
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-      body: formData,
-    });
+
+    const doUpload = () =>
+      fetch(`${BASE_URL}/upload`, {
+        method: 'POST',
+        headers: authHeader(),
+        body: formData,
+      });
+
+    let res = await doUpload();
+    if (res.status === 401) {
+      try {
+        await useAuthStore.getState().refresh();
+        res = await doUpload();
+      } catch {
+        useAuthStore.getState().logout();
+      }
+    }
+
     if (!res.ok) {
+      if (res.status === 401) {
+        useAuthStore.getState().logout();
+      }
       const text = await res.text();
       throw new ApiError(res.status, `${res.status}: ${text}`);
     }

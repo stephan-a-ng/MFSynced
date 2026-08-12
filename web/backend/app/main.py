@@ -51,8 +51,13 @@ async def request_logging_middleware(request: Request, call_next):
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
         try:
+            # Logging only — unverified claims peek to label the caller.
+            # Actual verification happens in the request's auth dependency
+            # (verify_user_access_token / require_agent_auth); an agent API
+            # key is not a JWT at all, so decoding it raises and we fall
+            # back to the "agent-key" label.
             from jose import jwt as _jwt
-            payload = _jwt.decode(auth[7:], settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM])
+            payload = _jwt.get_unverified_claims(auth[7:])
             caller = f"user:{payload.get('sub', '?')}"
         except Exception:
             caller = "agent-key"
