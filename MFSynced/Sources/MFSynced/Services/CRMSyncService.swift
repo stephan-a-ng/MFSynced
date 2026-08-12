@@ -173,6 +173,7 @@ final class CRMSyncService {
                     crmLog("[CRM] pullOutbound: auto-enabled sync for new contact \(phone)")
                 }
                 let hint = chatServiceHint?(phone)
+                crmLog("[CRM] pullOutbound: service hint for \(phone) = \(hint ?? "nil")")
                 let result = MessageSender.send(text: text, to: phone, preferredService: hint)
                 let status: String
                 let sendSuccess: Bool
