@@ -5,9 +5,9 @@
 	<key>CFBundleIdentifier</key>
 	<string>tech.moonfive.MFSynced</string>
 	<key>CFBundleName</key>
-	<string>MFSynced</string>
+	<string>Message</string>
 	<key>CFBundleDisplayName</key>
-	<string>MFSynced</string>
+	<string>Message</string>
 	<key>CFBundleExecutable</key>
 	<string>MFSynced</string>
 	<key>CFBundlePackageType</key>
@@ -25,9 +25,9 @@
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>MFSynced sends iMessages on your behalf by controlling Messages.</string>
+	<string>Message sends iMessages on your behalf by controlling Messages.</string>
 	<key>NSContactsUsageDescription</key>
-	<string>MFSynced uses your contacts to show names for iMessage conversations.</string>
+	<string>Message uses your contacts to show names for iMessage conversations.</string>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 </dict>

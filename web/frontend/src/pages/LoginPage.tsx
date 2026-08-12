@@ -30,7 +30,7 @@ export function LoginPage() {
       </div>
       <div className="m5-glass rounded-2xl shadow-lg p-8 max-w-sm w-full text-center animate-fade-in font-archivo">
         <FlowerMark size="40px" fill="currentColor" autoplay className="mx-auto mb-3 h-10 w-10 flex-none text-foreground" />
-        <h1 className="font-brand text-3xl font-extrabold text-foreground mb-2">MFSynced</h1>
+        <h1 className="font-brand text-3xl font-extrabold text-foreground mb-2">Message</h1>
         <p className="text-muted-foreground text-sm mb-1">Team iMessage Hub</p>
         <p className="text-muted-foreground text-xs mb-6">Sign in with your @moonfive.tech email</p>
         {error && <p className="text-destructive text-sm mb-4">{error}</p>}
