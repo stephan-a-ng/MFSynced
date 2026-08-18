@@ -58,6 +58,8 @@ final class CRMSyncService {
     var deliveryProbe: ((String, Int64) -> (delivered: Bool, errorCode: Int)?)?
     private var pollTimer: Timer?
     private let session = URLSession.shared
+    /// App-process start, for the heartbeat's uptime_seconds.
+    private let launchedAt = Date()
 
     init(config: CRMConfig, syncQueue: SyncQueueDatabase = SyncQueueDatabase()) {
         self.config = config
@@ -100,10 +102,49 @@ final class CRMSyncService {
 
     func poll() async {
         crmLog("[CRM] poll() called")
+        await sendHeartbeat()
         await pushInbound()
         await pullOutbound()
         await pushContactInfo()
         await updateCounts()
+    }
+
+    /// Fleet telemetry for the nexus (POST {apiEndpoint}/heartbeat).
+    ///
+    /// Fire-and-forget on purpose: a heartbeat must never block or fail
+    /// message sync, and an old backend that 404s the route costs nothing.
+    /// Every field is optional on the wire; the server samples what it
+    /// forwards to the datalake, so sending each poll tick is fine.
+    func sendHeartbeat() async {
+        guard let url = URL(string: "\(config.apiEndpoint)/heartbeat") else { return }
+        var body: [String: Any] = [
+            "agent_id": config.agentID,
+            "hostname": Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
+            "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
+            "poll_interval_seconds": max(1, Int(config.pollIntervalSeconds)),
+            "uptime_seconds": max(0, Int(Date().timeIntervalSince(launchedAt))),
+            "gate_applied": Array(config.syncedPhoneNumbers).sorted(),
+        ]
+        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
+            body["app_version"] = version
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (_, response) = try await session.data(for: request)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 {
+                // 404 = old backend without the fleet wire; anything else is
+                // worth one line per tick in the local log, nothing more.
+                if http.statusCode != 404 {
+                    crmLog("[CRM] heartbeat: HTTP \(http.statusCode)")
+                }
+            }
+        } catch {
+            crmLog("[CRM] heartbeat failed: \(error.localizedDescription)")
+        }
     }
 
     /// Push CNContactStore name+photo for synced phones the backend hasn't
