@@ -195,11 +195,27 @@ final class AppState {
 
     func toggleCRMSync(for conversation: Conversation) {
         if crmConfig.syncedPhoneNumbers.contains(conversation.id) {
+            // Removal is the OWNER's call once the server gate is live: the
+            // console edits the desired list and the Mac applies it on the
+            // next poll. A local remove here would just be overwritten (and
+            // would hide an audited decision), so it is refused with a log.
+            if crmService?.serverGateActive == true {
+                print("[CRM] gate remove \(conversation.id) is console-managed; use the Fleet page")
+                return
+            }
             crmConfig.syncedPhoneNumbers.remove(conversation.id)
+            crmConfig.save()
         } else {
+            // Optimistic local add for instant UI; the server add is the
+            // audited source of truth and the next gate pull reconciles
+            // (including rolling back if the server refused — e.g. 409
+            // while the agent has no owner).
             crmConfig.syncedPhoneNumbers.insert(conversation.id)
+            crmConfig.save()
+            let service = crmService
+            let phone = conversation.id
+            Task { await service?.requestGateAdd(phone) }
         }
-        crmConfig.save()
 
         if let idx = conversations.firstIndex(where: { $0.id == conversation.id }) {
             conversations[idx].isCRMSynced = crmConfig.syncedPhoneNumbers.contains(conversation.id)

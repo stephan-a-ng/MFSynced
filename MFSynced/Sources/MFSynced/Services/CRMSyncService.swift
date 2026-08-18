@@ -100,13 +100,112 @@ final class CRMSyncService {
         try? syncQueue.enqueue(direction: "inbound", messageGuid: message.guid, phone: message.chatIdentifier ?? "", payload: jsonString)
     }
 
+    /// True once the backend has answered GET /gate — from then on the
+    /// server-desired allowlist is authoritative and local removal is a
+    /// console action, not a Mac action. Stays false against the legacy
+    /// backend (404), which keeps every pre-nexus behavior intact.
+    private(set) var serverGateActive = false
+
     func poll() async {
         crmLog("[CRM] poll() called")
+        await pullGate()
         await sendHeartbeat()
         await pushInbound()
         await pullOutbound()
         await pushContactInfo()
         await updateCounts()
+    }
+
+    /// Pull the server-desired allowlist and APPLY it (config-sync pattern:
+    /// desired → applied → reported back via the next heartbeat).
+    ///
+    /// Removal is enforced all the way down: a number that left the gate is
+    /// dropped from the local set AND its already-queued rows are purged, so
+    /// nothing captured earlier keeps uploading after the owner revoked it.
+    func pullGate() async {
+        guard let url = URL(string: "\(config.apiEndpoint)/gate") else { return }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return }
+            if http.statusCode == 404 {
+                // Legacy backend: no gate wire. Local list stays authoritative.
+                serverGateActive = false
+                return
+            }
+            guard http.statusCode == 200,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let phones = json["phones"] as? [String] else { return }
+            serverGateActive = true
+            let desired = Set(phones)
+            let current = config.syncedPhoneNumbers
+            guard desired != current else { return }
+
+            let removed = current.subtracting(desired)
+            for phone in removed {
+                try? syncQueue.removeAll(phone: phone)
+            }
+            await MainActor.run {
+                self.config.syncedPhoneNumbers = desired
+                self.config.save()
+            }
+            crmLog(
+                "[CRM] gate applied: \(desired.count) number(s) "
+                + "(+\(desired.subtracting(current).count) -\(removed.count))"
+            )
+        } catch {
+            // Offline or transient — keep the last applied list.
+        }
+    }
+
+    /// Put a number through the gate via the server (audited, owner-rooted).
+    /// Returns true when the number is synced after the call. Against the
+    /// legacy backend (404) it falls back to the old local-only add.
+    @discardableResult
+    func requestGateAdd(_ phone: String) async -> Bool {
+        guard let url = URL(string: "\(config.apiEndpoint)/gate/entries") else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["phone": phone])
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+            switch http.statusCode {
+            case 200:
+                serverGateActive = true
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let phones = json["phones"] as? [String] {
+                    let desired = Set(phones)
+                    await MainActor.run {
+                        self.config.syncedPhoneNumbers = desired
+                        self.config.save()
+                    }
+                }
+                return true
+            case 404:
+                // Legacy backend: keep the pre-nexus local behavior.
+                await MainActor.run {
+                    if !self.config.syncedPhoneNumbers.contains(phone) {
+                        self.config.syncedPhoneNumbers.insert(phone)
+                        self.config.save()
+                    }
+                }
+                return true
+            case 409:
+                // No owner assigned yet — the structural onboarding rule.
+                crmLog("[CRM] gate add \(phone) refused: agent has no owner (assign one in the console)")
+                return false
+            default:
+                crmLog("[CRM] gate add \(phone): HTTP \(http.statusCode)")
+                return false
+            }
+        } catch {
+            crmLog("[CRM] gate add \(phone) failed: \(error.localizedDescription)")
+            return false
+        }
     }
 
     /// Fleet telemetry for the nexus (POST {apiEndpoint}/heartbeat).
@@ -211,7 +310,17 @@ final class CRMSyncService {
     }
 
     private func pushInbound() async {
-        guard let entries = try? syncQueue.fetchPending(direction: "inbound", limit: 50), !entries.isEmpty else { return }
+        guard var entries = try? syncQueue.fetchPending(direction: "inbound", limit: 50), !entries.isEmpty else { return }
+        // Gate re-check at DRAIN time, not just capture time: a number
+        // removed from the allowlist after its rows were queued must not
+        // upload. Stale rows are purged, not retried.
+        let gated = entries.filter { !config.syncedPhoneNumbers.contains($0.phone) }
+        if !gated.isEmpty {
+            for entry in gated { try? syncQueue.remove(messageGuid: entry.messageGuid) }
+            crmLog("[CRM] pushInbound: purged \(gated.count) queued row(s) for un-gated numbers")
+            entries.removeAll { !config.syncedPhoneNumbers.contains($0.phone) }
+            if entries.isEmpty { return }
+        }
         let messages = entries.compactMap { entry -> [String: Any]? in
             guard let data = entry.payload.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
@@ -274,18 +383,16 @@ final class CRMSyncService {
                       let text = msg["text"] as? String else { continue }
                 crmLog("[CRM] pullOutbound: sending cmd=\(cmdID) to=\(phone) text_len=\(text.count)")
                 // A portal-initiated send may target a phone that was never
-                // opted in to sync; without opting it in here, the sent message
-                // and any reply never flow back to the backend.
-                // Mutate config on the main actor: updateConfig() writes from
-                // the settings UI there, and this is the only other writer.
+                // opted in to sync; without opting it in, the sent message
+                // and any reply never flow back to the backend. The opt-in
+                // goes THROUGH the server gate (audited, owner-rooted);
+                // requestGateAdd falls back to the old local insert against
+                // a legacy backend, and a 409 (no owner) leaves the number
+                // un-synced by design.
                 if !config.syncedPhoneNumbers.contains(phone) {
-                    await MainActor.run {
-                        if !self.config.syncedPhoneNumbers.contains(phone) {
-                            self.config.syncedPhoneNumbers.insert(phone)
-                            self.config.save()
-                        }
+                    if await requestGateAdd(phone) {
+                        crmLog("[CRM] pullOutbound: auto-enabled sync for new contact \(phone)")
                     }
-                    crmLog("[CRM] pullOutbound: auto-enabled sync for new contact \(phone)")
                 }
                 let hint = chatServiceHint?(phone)
                 crmLog("[CRM] pullOutbound: service hint for \(phone) = \(hint ?? "nil")")

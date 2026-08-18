@@ -113,6 +113,22 @@ final class SyncQueueDatabase {
         sqlite3_step(stmt)
     }
 
+    /// Drop every queued row for one phone — the gate-removal purge. A number
+    /// the owner took OFF the allowlist must stop uploading immediately,
+    /// including rows already captured and retrying.
+    func removeAll(phone: String) throws {
+        guard let db = open() else { throw SyncQueueError.openFailed }
+        defer { sqlite3_close(db) }
+        let sql = "DELETE FROM sync_queue WHERE phone = ?"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (phone as NSString).utf8String, -1, nil)
+        sqlite3_step(stmt)
+    }
+
     func incrementRetry(messageGuid: String, nextRetryIn: TimeInterval) throws {
         guard let db = open() else { throw SyncQueueError.openFailed }
         defer { sqlite3_close(db) }

@@ -31,6 +31,13 @@ struct CRMSyncSettingsView: View {
             }
 
             Section("Synced Contacts") {
+                Text(
+                    "When connected to the nexus, this allowlist is managed by "
+                    + "the agent's owner in the Messages console (Fleet page); "
+                    + "the Mac applies the server's list on each poll."
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 if config.syncedPhoneNumbers.isEmpty {
                     Text("No contacts synced. Right-click a contact in the sidebar to enable CRM sync.")
                         .foregroundStyle(.secondary)
