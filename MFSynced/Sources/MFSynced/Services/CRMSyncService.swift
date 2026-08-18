@@ -40,7 +40,36 @@ final class CRMSyncService {
     var pendingOutbound: Int = 0
     var recentOutboundResults: [OutboundResult] = []
 
-    private var config: CRMConfig
+    // Config is read from the poll task and written by the gate wire and
+    // the settings UI — a plain var would be a cross-task data race on the
+    // Set inside. Every access goes through the lock; reads take a value
+    // snapshot (CRMConfig is a struct), writers use mutateConfig so the
+    // save + change notification can never be forgotten.
+    private let configLock = NSLock()
+    private var _config: CRMConfig
+    private var config: CRMConfig {
+        configLock.lock()
+        defer { configLock.unlock() }
+        return _config
+    }
+
+    /// The one channel back to the UI: AppState holds its own copy of the
+    /// config (value type), so every service-side change — a gate pull, a
+    /// server add, the 409 rollback on the next pull — must be pushed to it
+    /// or the sidebar's sync flags lie. Called on the main queue.
+    var onConfigChanged: ((CRMConfig) -> Void)?
+
+    private func mutateConfig(_ transform: (inout CRMConfig) -> Void) {
+        configLock.lock()
+        transform(&_config)
+        let snapshot = _config
+        configLock.unlock()
+        snapshot.save()
+        DispatchQueue.main.async { [weak self] in
+            self?.onConfigChanged?(snapshot)
+        }
+    }
+
     private let syncQueue: SyncQueueDatabase
     /// Looks up a chat's Messages service ("iMessage"/"SMS"/...) so outbound
     /// sends target the right account. Injected (ChatDatabase-backed) so the
@@ -57,17 +86,23 @@ final class CRMSyncService {
     /// after a watermark; nil until Messages writes the row.
     var deliveryProbe: ((String, Int64) -> (delivered: Bool, errorCode: Int)?)?
     private var pollTimer: Timer?
+    /// Main-thread only (timer closure + main-actor reset).
+    private var pollInFlight = false
     private let session = URLSession.shared
     /// App-process start, for the heartbeat's uptime_seconds.
     private let launchedAt = Date()
 
     init(config: CRMConfig, syncQueue: SyncQueueDatabase = SyncQueueDatabase()) {
-        self.config = config
+        self._config = config
         self.syncQueue = syncQueue
         crmLog("[CRM] init — isEnabled=\(config.isEnabled) endpoint='\(config.apiEndpoint)' synced=\(config.syncedPhoneNumbers.count)")
     }
 
-    func updateConfig(_ config: CRMConfig) { self.config = config }
+    func updateConfig(_ config: CRMConfig) {
+        configLock.lock()
+        _config = config
+        configLock.unlock()
+    }
 
     func startPolling() {
         guard config.isEnabled, !config.apiEndpoint.isEmpty else {
@@ -77,8 +112,21 @@ final class CRMSyncService {
         crmLog("[CRM] startPolling: starting timer every \(config.pollIntervalSeconds)s → \(config.apiEndpoint)")
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: config.pollIntervalSeconds, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            // One tick at a time: the timer fires on the main run loop, and
+            // pollInFlight is only touched here and in the main-actor reset
+            // below, so a slow network can delay ticks but never overlap
+            // two poll() tasks racing the same state.
+            guard !self.pollInFlight else {
+                crmLog("[CRM] timer fired — previous poll still running, skipping tick")
+                return
+            }
+            self.pollInFlight = true
             crmLog("[CRM] timer fired")
-            Task { await self?.poll() }
+            Task {
+                await self.poll()
+                await MainActor.run { self.pollInFlight = false }
+            }
         }
     }
 
@@ -100,13 +148,105 @@ final class CRMSyncService {
         try? syncQueue.enqueue(direction: "inbound", messageGuid: message.guid, phone: message.chatIdentifier ?? "", payload: jsonString)
     }
 
+    /// True once the backend has answered GET /gate — from then on the
+    /// server-desired allowlist is authoritative and local removal is a
+    /// console action, not a Mac action. Stays false against the legacy
+    /// backend (404), which keeps every pre-nexus behavior intact.
+    private(set) var serverGateActive = false
+
     func poll() async {
         crmLog("[CRM] poll() called")
+        await pullGate()
         await sendHeartbeat()
         await pushInbound()
         await pullOutbound()
         await pushContactInfo()
         await updateCounts()
+    }
+
+    /// Pull the server-desired allowlist and APPLY it (config-sync pattern:
+    /// desired → applied → reported back via the next heartbeat).
+    ///
+    /// Removal is enforced all the way down: a number that left the gate is
+    /// dropped from the local set AND its already-queued rows are purged, so
+    /// nothing captured earlier keeps uploading after the owner revoked it.
+    func pullGate() async {
+        guard let url = URL(string: "\(config.apiEndpoint)/gate") else { return }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return }
+            if http.statusCode == 404 {
+                // Legacy backend: no gate wire. Local list stays
+                // authoritative — but STICKY the other way: once the gate
+                // wire has answered 200 once, a lone 404 (proxy hiccup,
+                // mid-deploy route gap) must not reopen local-only edits
+                // the console believes it owns. Deployed routes do not
+                // disappear.
+                return
+            }
+            guard http.statusCode == 200,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let phones = json["phones"] as? [String] else { return }
+            serverGateActive = true
+            let desired = Set(phones)
+            let current = config.syncedPhoneNumbers
+            guard desired != current else { return }
+
+            let removed = current.subtracting(desired)
+            for phone in removed {
+                try? syncQueue.removeAll(phone: phone)
+            }
+            mutateConfig { $0.syncedPhoneNumbers = desired }
+            crmLog(
+                "[CRM] gate applied: \(desired.count) number(s) "
+                + "(+\(desired.subtracting(current).count) -\(removed.count))"
+            )
+        } catch {
+            // Offline or transient — keep the last applied list.
+        }
+    }
+
+    /// Put a number through the gate via the server (audited, owner-rooted).
+    /// Returns true when the number is synced after the call. Against the
+    /// legacy backend (404) it falls back to the old local-only add.
+    @discardableResult
+    func requestGateAdd(_ phone: String) async -> Bool {
+        guard let url = URL(string: "\(config.apiEndpoint)/gate/entries") else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["phone": phone])
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+            switch http.statusCode {
+            case 200:
+                serverGateActive = true
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let phones = json["phones"] as? [String] {
+                    let desired = Set(phones)
+                    mutateConfig { $0.syncedPhoneNumbers = desired }
+                }
+                return true
+            case 404:
+                // Legacy backend: keep the pre-nexus local behavior.
+                mutateConfig { $0.syncedPhoneNumbers.insert(phone) }
+                return true
+            case 409:
+                // No owner assigned yet — the structural onboarding rule.
+                crmLog("[CRM] gate add \(phone) refused: agent has no owner (assign one in the console)")
+                return false
+            default:
+                crmLog("[CRM] gate add \(phone): HTTP \(http.statusCode)")
+                return false
+            }
+        } catch {
+            crmLog("[CRM] gate add \(phone) failed: \(error.localizedDescription)")
+            return false
+        }
     }
 
     /// Fleet telemetry for the nexus (POST {apiEndpoint}/heartbeat).
@@ -211,7 +351,17 @@ final class CRMSyncService {
     }
 
     private func pushInbound() async {
-        guard let entries = try? syncQueue.fetchPending(direction: "inbound", limit: 50), !entries.isEmpty else { return }
+        guard var entries = try? syncQueue.fetchPending(direction: "inbound", limit: 50), !entries.isEmpty else { return }
+        // Gate re-check at DRAIN time, not just capture time: a number
+        // removed from the allowlist after its rows were queued must not
+        // upload. Stale rows are purged, not retried.
+        let gated = entries.filter { !config.syncedPhoneNumbers.contains($0.phone) }
+        if !gated.isEmpty {
+            for entry in gated { try? syncQueue.remove(messageGuid: entry.messageGuid) }
+            crmLog("[CRM] pushInbound: purged \(gated.count) queued row(s) for un-gated numbers")
+            entries.removeAll { !config.syncedPhoneNumbers.contains($0.phone) }
+            if entries.isEmpty { return }
+        }
         let messages = entries.compactMap { entry -> [String: Any]? in
             guard let data = entry.payload.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
@@ -274,18 +424,16 @@ final class CRMSyncService {
                       let text = msg["text"] as? String else { continue }
                 crmLog("[CRM] pullOutbound: sending cmd=\(cmdID) to=\(phone) text_len=\(text.count)")
                 // A portal-initiated send may target a phone that was never
-                // opted in to sync; without opting it in here, the sent message
-                // and any reply never flow back to the backend.
-                // Mutate config on the main actor: updateConfig() writes from
-                // the settings UI there, and this is the only other writer.
+                // opted in to sync; without opting it in, the sent message
+                // and any reply never flow back to the backend. The opt-in
+                // goes THROUGH the server gate (audited, owner-rooted);
+                // requestGateAdd falls back to the old local insert against
+                // a legacy backend, and a 409 (no owner) leaves the number
+                // un-synced by design.
                 if !config.syncedPhoneNumbers.contains(phone) {
-                    await MainActor.run {
-                        if !self.config.syncedPhoneNumbers.contains(phone) {
-                            self.config.syncedPhoneNumbers.insert(phone)
-                            self.config.save()
-                        }
+                    if await requestGateAdd(phone) {
+                        crmLog("[CRM] pullOutbound: auto-enabled sync for new contact \(phone)")
                     }
-                    crmLog("[CRM] pullOutbound: auto-enabled sync for new contact \(phone)")
                 }
                 let hint = chatServiceHint?(phone)
                 crmLog("[CRM] pullOutbound: service hint for \(phone) = \(hint ?? "nil")")
