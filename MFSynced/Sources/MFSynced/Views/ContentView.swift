@@ -47,6 +47,23 @@ final class AppState {
         crmService?.deliveryProbe = { [weak self] phone, afterRowID in
             self?.chatDB.outgoingDeliveryState(identifier: phone, afterRowID: afterRowID)
         }
+        // The service owns the gate now (server-desired allowlist): every
+        // change it applies — a gate pull, a server-routed add, the rollback
+        // after a refused add — flows back here so AppState's copy and the
+        // sidebar's sync flags never drift from what actually uploads.
+        // Called on the main queue.
+        crmService?.onConfigChanged = { [weak self] cfg in
+            guard let self else { return }
+            self.crmConfig = cfg
+            for idx in self.conversations.indices {
+                self.conversations[idx].isCRMSynced =
+                    cfg.syncedPhoneNumbers.contains(self.conversations[idx].id)
+            }
+            if let selected = self.selectedConversation,
+               let idx = self.conversations.firstIndex(where: { $0.id == selected.id }) {
+                self.selectedConversation = self.conversations[idx]
+            }
+        }
         if crmConfig.isEnabled {
             crmService?.startPolling()
         }

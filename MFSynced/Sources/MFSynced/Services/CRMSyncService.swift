@@ -40,7 +40,36 @@ final class CRMSyncService {
     var pendingOutbound: Int = 0
     var recentOutboundResults: [OutboundResult] = []
 
-    private var config: CRMConfig
+    // Config is read from the poll task and written by the gate wire and
+    // the settings UI — a plain var would be a cross-task data race on the
+    // Set inside. Every access goes through the lock; reads take a value
+    // snapshot (CRMConfig is a struct), writers use mutateConfig so the
+    // save + change notification can never be forgotten.
+    private let configLock = NSLock()
+    private var _config: CRMConfig
+    private var config: CRMConfig {
+        configLock.lock()
+        defer { configLock.unlock() }
+        return _config
+    }
+
+    /// The one channel back to the UI: AppState holds its own copy of the
+    /// config (value type), so every service-side change — a gate pull, a
+    /// server add, the 409 rollback on the next pull — must be pushed to it
+    /// or the sidebar's sync flags lie. Called on the main queue.
+    var onConfigChanged: ((CRMConfig) -> Void)?
+
+    private func mutateConfig(_ transform: (inout CRMConfig) -> Void) {
+        configLock.lock()
+        transform(&_config)
+        let snapshot = _config
+        configLock.unlock()
+        snapshot.save()
+        DispatchQueue.main.async { [weak self] in
+            self?.onConfigChanged?(snapshot)
+        }
+    }
+
     private let syncQueue: SyncQueueDatabase
     /// Looks up a chat's Messages service ("iMessage"/"SMS"/...) so outbound
     /// sends target the right account. Injected (ChatDatabase-backed) so the
@@ -57,17 +86,23 @@ final class CRMSyncService {
     /// after a watermark; nil until Messages writes the row.
     var deliveryProbe: ((String, Int64) -> (delivered: Bool, errorCode: Int)?)?
     private var pollTimer: Timer?
+    /// Main-thread only (timer closure + main-actor reset).
+    private var pollInFlight = false
     private let session = URLSession.shared
     /// App-process start, for the heartbeat's uptime_seconds.
     private let launchedAt = Date()
 
     init(config: CRMConfig, syncQueue: SyncQueueDatabase = SyncQueueDatabase()) {
-        self.config = config
+        self._config = config
         self.syncQueue = syncQueue
         crmLog("[CRM] init — isEnabled=\(config.isEnabled) endpoint='\(config.apiEndpoint)' synced=\(config.syncedPhoneNumbers.count)")
     }
 
-    func updateConfig(_ config: CRMConfig) { self.config = config }
+    func updateConfig(_ config: CRMConfig) {
+        configLock.lock()
+        _config = config
+        configLock.unlock()
+    }
 
     func startPolling() {
         guard config.isEnabled, !config.apiEndpoint.isEmpty else {
@@ -77,8 +112,21 @@ final class CRMSyncService {
         crmLog("[CRM] startPolling: starting timer every \(config.pollIntervalSeconds)s → \(config.apiEndpoint)")
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: config.pollIntervalSeconds, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            // One tick at a time: the timer fires on the main run loop, and
+            // pollInFlight is only touched here and in the main-actor reset
+            // below, so a slow network can delay ticks but never overlap
+            // two poll() tasks racing the same state.
+            guard !self.pollInFlight else {
+                crmLog("[CRM] timer fired — previous poll still running, skipping tick")
+                return
+            }
+            self.pollInFlight = true
             crmLog("[CRM] timer fired")
-            Task { await self?.poll() }
+            Task {
+                await self.poll()
+                await MainActor.run { self.pollInFlight = false }
+            }
         }
     }
 
@@ -130,8 +178,12 @@ final class CRMSyncService {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return }
             if http.statusCode == 404 {
-                // Legacy backend: no gate wire. Local list stays authoritative.
-                serverGateActive = false
+                // Legacy backend: no gate wire. Local list stays
+                // authoritative — but STICKY the other way: once the gate
+                // wire has answered 200 once, a lone 404 (proxy hiccup,
+                // mid-deploy route gap) must not reopen local-only edits
+                // the console believes it owns. Deployed routes do not
+                // disappear.
                 return
             }
             guard http.statusCode == 200,
@@ -146,10 +198,7 @@ final class CRMSyncService {
             for phone in removed {
                 try? syncQueue.removeAll(phone: phone)
             }
-            await MainActor.run {
-                self.config.syncedPhoneNumbers = desired
-                self.config.save()
-            }
+            mutateConfig { $0.syncedPhoneNumbers = desired }
             crmLog(
                 "[CRM] gate applied: \(desired.count) number(s) "
                 + "(+\(desired.subtracting(current).count) -\(removed.count))"
@@ -179,20 +228,12 @@ final class CRMSyncService {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let phones = json["phones"] as? [String] {
                     let desired = Set(phones)
-                    await MainActor.run {
-                        self.config.syncedPhoneNumbers = desired
-                        self.config.save()
-                    }
+                    mutateConfig { $0.syncedPhoneNumbers = desired }
                 }
                 return true
             case 404:
                 // Legacy backend: keep the pre-nexus local behavior.
-                await MainActor.run {
-                    if !self.config.syncedPhoneNumbers.contains(phone) {
-                        self.config.syncedPhoneNumbers.insert(phone)
-                        self.config.save()
-                    }
-                }
+                mutateConfig { $0.syncedPhoneNumbers.insert(phone) }
                 return true
             case 409:
                 // No owner assigned yet — the structural onboarding rule.
