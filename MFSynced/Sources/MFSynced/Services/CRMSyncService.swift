@@ -5,6 +5,9 @@ private let crmLogger = Logger(subsystem: "tech.moonfive.MFSynced", category: "C
 
 private func crmLog(_ message: String) {
     crmLogger.info("\(message, privacy: .public)")
+    // Buffered for upload to the nexus (drained by uploadLogs each poll) —
+    // an append can never block or fail, see FleetLogBuffer.
+    FleetLogBuffer.shared.append(line: message)
     // Also write to file for easy tailing
     let path = NSHomeDirectory() + "/Library/Logs/mfsynced_crm.log"
     let line = "\(Date()): \(message)\n"
@@ -114,6 +117,53 @@ final class CRMSyncService {
         await pullOutbound()
         await pushContactInfo()
         await updateCounts()
+        // Last on purpose: logs describe the tick that just happened, and a
+        // slow/failed upload must never delay the messaging work above.
+        await uploadLogs()
+    }
+
+    /// Drain one batch of buffered crmLog lines to the nexus
+    /// (POST {apiEndpoint}/logs). Failure re-buffers the batch (drop-oldest
+    /// cap applies); a legacy backend (404) discards it — there is nowhere
+    /// for those lines to go, and hoarding them would only evict newer ones.
+    func uploadLogs() async {
+        let batch = FleetLogBuffer.shared.drain(max: 200)
+        guard !batch.isEmpty else { return }
+        guard let url = URL(string: "\(config.apiEndpoint)/logs") else { return }
+
+        let iso = ISO8601DateFormatter()
+        let lines: [[String: Any]] = batch.map { entry in
+            [
+                "ts": iso.string(from: entry.ts),
+                "level": entry.level,
+                "category": entry.category,
+                "line": entry.line,
+            ]
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["agent_id": config.agentID, "lines": lines]
+        )
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                FleetLogBuffer.shared.requeue(batch)
+                return
+            }
+            switch http.statusCode {
+            case 200:
+                break
+            case 404:
+                break  // Legacy backend: no log wire; drop the batch.
+            default:
+                FleetLogBuffer.shared.requeue(batch)
+            }
+        } catch {
+            FleetLogBuffer.shared.requeue(batch)
+        }
     }
 
     /// Pull the server-desired allowlist and APPLY it (config-sync pattern:
