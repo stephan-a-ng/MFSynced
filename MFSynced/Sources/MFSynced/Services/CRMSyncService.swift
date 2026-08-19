@@ -110,6 +110,25 @@ final class CRMSyncService {
     /// Delivery state (receipt + error code) of the first outgoing message
     /// after a watermark; nil until Messages writes the row.
     var deliveryProbe: ((String, Int64) -> (delivered: Bool, errorCode: Int)?)?
+    /// Fires once for each identifier `pullGate()` finds newly added to the
+    /// server-desired gate (see `gateBackfillTargets`) — the completeness
+    /// backstop beyond the ~2000 staged rows the server already promoted:
+    /// the Mac backfills that conversation's FULL history via the same
+    /// syncHistory path the forward/manual-add flows use. Injected
+    /// (AppState-backed, driving AppState.syncHistoryToCRM(forChatIdentifier:))
+    /// so the sync service stays testable without a live chat.db — same DI
+    /// pattern as catalogChatsProvider/stagedMessagesProvider. Fire-and-
+    /// forget: the closure itself owns kicking off the (async) backfill.
+    var historyBackfillRequest: ((String) -> Void)?
+    /// Identifiers already sent through `historyBackfillRequest` this
+    /// process launch — in-memory only (telemetry-like: a relaunch
+    /// re-running a backfill is acceptable, same rationale as
+    /// `lastCatalogUploadAt`). Deliberately never cleared, including when a
+    /// number leaves the gate: a number that flickers gated/un-gated/gated
+    /// again already has its full history from the first backfill, so
+    /// re-fetching it from scratch again would be redundant work, not a
+    /// correctness fix. Internal (not private) for test visibility.
+    var backfilledThisSession = Set<String>()
     private var pollTimer: Timer?
     /// Main-thread only (timer closure + main-actor reset).
     private var pollInFlight = false
@@ -250,12 +269,44 @@ final class CRMSyncService {
         }
     }
 
+    /// Pure diff: which of `desired`'s identifiers should get an automatic
+    /// history backfill triggered right now. An identifier qualifies when
+    /// it is newly present — in `desired` but not `previouslyApplied`, i.e.
+    /// the gate just gained it — AND has not already been backfilled this
+    /// session (`alreadyBackfilled`, see `backfilledThisSession`). Sorted
+    /// for deterministic test/log output (the inputs are Sets). Static and
+    /// pure so the diff + dedup logic is testable without network or
+    /// chat.db (mirrors `catalogUploadDecision`/`stagedRowsPlan`) — the
+    /// caller (`pullGate`) supplies the real Sets and fires
+    /// `historyBackfillRequest` for each result.
+    static func gateBackfillTargets(
+        previouslyApplied: Set<String>,
+        desired: Set<String>,
+        alreadyBackfilled: Set<String>
+    ) -> [String] {
+        let newlyAdded = desired.subtracting(previouslyApplied)
+        return newlyAdded.subtracting(alreadyBackfilled).sorted()
+    }
+
     /// Pull the server-desired allowlist and APPLY it (config-sync pattern:
     /// desired → applied → reported back via the next heartbeat).
     ///
     /// Removal is enforced all the way down: a number that left the gate is
     /// dropped from the local set AND its already-queued rows are purged, so
     /// nothing captured earlier keeps uploading after the owner revoked it.
+    ///
+    /// A number newly added to the gate also gets its full history
+    /// backfilled (see `gateBackfillTargets`) — the completeness backstop
+    /// beyond the ~2000 staged rows the server already promoted when the
+    /// conversation was shared in the console. A number added FROM the Mac
+    /// side (`requestGateAdd`, e.g. the sidebar's right-click add, or
+    /// `pullOutbound`'s auto-enable-on-send) never appears here as "newly
+    /// added": `requestGateAdd` applies the server's confirmed set via
+    /// `mutateConfig` as soon as its own HTTP round trip completes, which
+    /// happens well before the next timer-driven `pullGate()` tick, so
+    /// `current` below already contains it by the time this diff runs. That
+    /// path also never called `syncHistory` before this change, so this is
+    /// a no-op for it either way, not a suppressed duplicate.
     func pullGate() async {
         guard let url = URL(string: "\(config.apiEndpoint)/gate") else { return }
         var request = URLRequest(url: url)
@@ -284,11 +335,24 @@ final class CRMSyncService {
             for phone in removed {
                 try? syncQueue.removeAll(phone: phone)
             }
+            let added = desired.subtracting(current)
             mutateConfig { $0.syncedPhoneNumbers = desired }
             crmLog(
                 "[CRM] gate applied: \(desired.count) number(s) "
-                + "(+\(desired.subtracting(current).count) -\(removed.count))"
+                + "(+\(added.count) -\(removed.count))"
             )
+
+            // Completeness backstop: backfill full history for every number
+            // that just entered the gate, at most once per identifier per
+            // session (see `backfilledThisSession`'s doc comment).
+            let backfillTargets = Self.gateBackfillTargets(
+                previouslyApplied: current, desired: desired, alreadyBackfilled: backfilledThisSession
+            )
+            for phone in backfillTargets {
+                backfilledThisSession.insert(phone)
+                crmLog("[CRM] gate backfill: triggering history sync for \(phone)")
+                historyBackfillRequest?(phone)
+            }
         } catch {
             // Offline or transient — keep the last applied list.
         }
