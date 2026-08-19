@@ -66,6 +66,18 @@ final class AppState {
         crmService?.deliveryProbe = { [weak self] phone, afterRowID in
             self?.chatDB.outgoingDeliveryState(identifier: phone, afterRowID: afterRowID)
         }
+        // Completeness backstop: when the server-desired gate gains a
+        // number (a conversation just shared in the console), pullGate()
+        // fires this once per newly-added identifier so its full history
+        // backfills the same way the sidebar's "Sync History" action and
+        // the forward-to-teammate flow do — beyond the ~2000 staged rows
+        // the server already promoted. Fire-and-forget: syncHistory is
+        // async, so this hop into a detached Task is required since
+        // historyBackfillRequest itself is a synchronous trigger.
+        crmService?.historyBackfillRequest = { [weak self] chatIdentifier in
+            guard let self else { return }
+            Task { await self.syncHistoryToCRM(forChatIdentifier: chatIdentifier) }
+        }
         // The service owns the gate now (server-desired allowlist): every
         // change it applies — a gate pull, a server-routed add, the rollback
         // after a refused add — flows back here so AppState's copy and the
@@ -292,13 +304,23 @@ final class AppState {
     }
 
     func syncHistoryToCRM(for conversation: Conversation) async {
-        let contactName = contactStore.contact(for: conversation.id).fullName
-        appLog("[AppState] syncHistoryToCRM called id=\(conversation.id) crmService=\(crmService != nil)")
+        await syncHistoryToCRM(forChatIdentifier: conversation.id)
+    }
+
+    /// Same backfill as `syncHistoryToCRM(for:)`, driven by a bare chat
+    /// identifier instead of a loaded `Conversation`. The gate-triggered
+    /// auto-backfill (`CRMSyncService.historyBackfillRequest`, wired in
+    /// `startPolling()`) fires for a number the console just gated, which
+    /// may not have a `Conversation` loaded in `conversations` yet — so it
+    /// cannot go through `syncHistoryToCRM(for:)`'s conversation lookup.
+    func syncHistoryToCRM(forChatIdentifier chatIdentifier: String) async {
+        let contactName = contactStore.contact(for: chatIdentifier).fullName
+        appLog("[AppState] syncHistoryToCRM called id=\(chatIdentifier) crmService=\(crmService != nil)")
         guard let svc = crmService else {
             appLog("[AppState] ERROR: crmService is nil — skipping sync")
             return
         }
-        await svc.syncHistory(chatIdentifier: conversation.id, chatDB: chatDB, contactName: contactName)
+        await svc.syncHistory(chatIdentifier: chatIdentifier, chatDB: chatDB, contactName: contactName)
     }
 
     /// Enables CRM sync for a conversation and syncs history if it wasn't already enabled.
