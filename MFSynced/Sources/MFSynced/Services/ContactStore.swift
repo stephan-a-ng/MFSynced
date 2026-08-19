@@ -1,6 +1,18 @@
 import Foundation
 import Contacts
 import AppKit
+import OSLog
+
+private let contactStoreLogger = Logger(subsystem: "tech.moonfive.MFSynced", category: "ContactStore")
+
+/// Mirrors CRMSyncService's crmLog (private to that file, so not directly
+/// reusable here): OSLog plus the same FleetLogBuffer ring the nexus drains
+/// on every poll tick, so a write failure here still surfaces in the fleet
+/// log viewer without SSH access to the Mac.
+private func contactLog(_ message: String) {
+    contactStoreLogger.info("\(message, privacy: .public)")
+    FleetLogBuffer.shared.append(category: "ContactStore", line: message)
+}
 
 @Observable
 final class ContactStore {
@@ -83,6 +95,119 @@ final class ContactStore {
                    from: .zero, operation: .copy, fraction: 1)
         ctx.flushGraphics()
         return rep.representation(using: .jpeg, properties: [.compressionFactor: quality])
+    }
+
+    // MARK: - Console → Address Book write-back (S5)
+
+    /// Phone match keys for `identifier`: the full digit string plus (when
+    /// long enough) its last-10-digit form — the same digit/last-10
+    /// matching `buildPhoneMap`/`contact(for:)` already use, so an update
+    /// phone in a different format (with/without country code, punctuation)
+    /// still resolves to the same contact the rest of the app would.
+    private static func phoneMatchKeys(for identifier: String) -> Set<String> {
+        let digits = identifier.filter { $0.isNumber }
+        guard !digits.isEmpty else { return [] }
+        var keys: Set<String> = [digits]
+        if digits.count >= 10 {
+            keys.insert(String(digits.suffix(10)))
+        }
+        return keys
+    }
+
+    /// Splits a console `display_name` into CNContact's givenName/
+    /// familyName on the LAST space — "Mary Jane Watson" → given
+    /// "Mary Jane", family "Watson" (keeps a multi-word given name intact
+    /// rather than the family name). A single token (no space) becomes
+    /// givenName-only, familyName "". Pure — no Contacts access — so this
+    /// is directly unit-testable.
+    static func nameSplit(_ displayName: String) -> (given: String, family: String) {
+        let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let lastSpace = trimmed.range(of: " ", options: .backwards) else {
+            return (trimmed, "")
+        }
+        let given = String(trimmed[trimmed.startIndex..<lastSpace.lowerBound])
+        let family = String(trimmed[lastSpace.upperBound...])
+        return (given, family)
+    }
+
+    /// Applies a console-side NAME/PHOTO edit to the first local CNContact
+    /// matching ANY of `phones` — Stephan's call: ANY matching contact, not
+    /// just one already shared to the CRM, using the same digit/last-10
+    /// matching `contact(for:)` uses. Returns whether anything was actually
+    /// written. Contacts write uses the SAME `.contacts` authorization
+    /// already requested at launch (full access includes write on macOS);
+    /// a save failure (permission revoked mid-session, contact deleted
+    /// concurrently, etc.) degrades silently to `false` — logged, never
+    /// thrown into the poll loop.
+    @discardableResult
+    func applyContactUpdate(phones: [String], displayName: String?, photoJPEG: Data?) -> Bool {
+        let targetKeys = Set(phones.flatMap(Self.phoneMatchKeys(for:)))
+        guard !targetKeys.isEmpty else { return false }
+
+        // Mutation fetch: unlike buildPhoneMap's cached name+thumbnail map,
+        // applying an edit needs the live CNContact (for mutableCopy) plus
+        // CNContactImageDataKey (the full-res settable image, not the
+        // read-only CNContactThumbnailImageDataKey buildPhoneMap fetches).
+        let keysToFetch: [CNKeyDescriptor] = [
+            CNContactGivenNameKey as CNKeyDescriptor,
+            CNContactFamilyNameKey as CNKeyDescriptor,
+            CNContactPhoneNumbersKey as CNKeyDescriptor,
+            CNContactImageDataKey as CNKeyDescriptor,
+        ]
+        let request = CNContactFetchRequest(keysToFetch: keysToFetch)
+        var match: CNContact?
+        do {
+            try store.enumerateContacts(with: request) { cnContact, stop in
+                let contactKeys = Set(cnContact.phoneNumbers.flatMap {
+                    Self.phoneMatchKeys(for: $0.value.stringValue)
+                })
+                if !contactKeys.isDisjoint(with: targetKeys) {
+                    match = cnContact
+                    stop.pointee = true
+                }
+            }
+        } catch {
+            contactLog("[ContactStore] applyContactUpdate: enumerate failed: \(error.localizedDescription)")
+            return false
+        }
+        guard let match, let mutable = match.mutableCopy() as? CNMutableContact else { return false }
+
+        var changed = false
+        if let displayName, !displayName.isEmpty {
+            let (given, family) = Self.nameSplit(displayName)
+            if mutable.givenName != given || mutable.familyName != family {
+                mutable.givenName = given
+                mutable.familyName = family
+                changed = true
+            }
+        }
+        if let photoJPEG {
+            // Cheap inequality proxy: compare encoded byte counts, not
+            // bytes — a full byte compare is unneeded I/O for a photo that
+            // in practice either matches or doesn't; a same-length-
+            // different-bytes false negative just skips one sync cycle,
+            // corrected by the next update.
+            if mutable.imageData?.count != photoJPEG.count {
+                mutable.imageData = photoJPEG
+                changed = true
+            }
+        }
+        guard changed else { return false }
+
+        let saveRequest = CNSaveRequest()
+        saveRequest.update(mutable)
+        do {
+            try store.execute(saveRequest)
+        } catch {
+            contactLog("[ContactStore] applyContactUpdate: save failed: \(error.localizedDescription)")
+            return false
+        }
+        // Fire-and-forget refresh: applyContactUpdate is a synchronous DI
+        // callback (CRMSyncService.contactUpdateApplier), so the cache
+        // invalidation can't be awaited inline — mirrors contact(for:)'s
+        // Task.detached load-on-demand.
+        Task.detached { [weak self] in await self?.refresh() }
+        return true
     }
 
     func requestAccess() async -> Bool {

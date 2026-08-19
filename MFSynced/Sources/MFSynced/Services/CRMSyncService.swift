@@ -89,6 +89,24 @@ final class CRMSyncService {
     /// 200/404/5xx branches without a live endpoint. Internal (not private)
     /// for test visibility.
     var contactPushStatusOverride: ((URLRequest) -> Int?)?
+    /// Applies one console-side contact NAME/PHOTO edit to this Mac's
+    /// Address Book (S5 write-back); production wires
+    /// ContactStore.applyContactUpdate in ContentView. Injected like
+    /// contactInfoProvider so the sync service stays testable without live
+    /// Contacts access. Returns whether anything was actually written —
+    /// `false` (no local match, or nothing changed) still counts as a
+    /// successfully-applied update for cursor-advance purposes; only a
+    /// thrown network/parse error withholds the advance.
+    var contactUpdateApplier: (([String], String?, Data?) -> Bool)?
+    /// Test seam for `pullContactUpdates()`'s GET `/contact-updates`: when
+    /// set, the request is routed through this closure instead of a real
+    /// `URLSession` call, returning (status code, response body) to react
+    /// to (nil simulates a network failure / no response). Same
+    /// closure-override DI convention as `contactPushStatusOverride` — nil
+    /// in production, so the real network path always runs there; tests
+    /// set it to exercise the 200/404/error branches without a live
+    /// endpoint. Internal (not private) for test visibility.
+    var contactUpdatesFetchOverride: ((URLRequest) -> (status: Int, body: Data)?)?
     /// Enumerates every 1:1 conversation (metadata only) for the candidate
     /// catalog upload; injected (ChatDatabase.fetchCatalog()-backed in
     /// production) so the sync service stays testable without a live chat.db.
@@ -113,6 +131,12 @@ final class CRMSyncService {
     /// of waiting on real wall-clock seconds.
     var catalogMinIntervalSeconds: TimeInterval = 60
     var catalogFloorIntervalSeconds: TimeInterval = 600
+    /// contact-updates poll gating — in-memory only (a relaunch re-polling
+    /// from the persisted cursor is fine and intended, same rationale as
+    /// `lastCatalogUploadAt`). Internal for test visibility.
+    var lastContactUpdatesPollAt: TimeInterval?
+    /// Overridable by tests, same rationale as `catalogMinIntervalSeconds`.
+    var contactUpdatesMinIntervalSeconds: TimeInterval = 60
     /// chat.db's current max message ROWID — watermark taken just before a
     /// send so the verifier can find the row that send created.
     var chatMaxRowID: (() -> Int64)?
@@ -217,6 +241,7 @@ final class CRMSyncService {
     func poll() async {
         crmLog("[CRM] poll() called")
         await pullGate()
+        await pullContactUpdates()
         await sendHeartbeat()
         await pushInbound()
         await pullOutbound()
@@ -405,6 +430,115 @@ final class CRMSyncService {
         } catch {
             crmLog("[CRM] gate add \(phone) failed: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    // MARK: - Contact write-back (S5)
+
+    /// One console-side contact edit (NAME and/or PHOTO). `phones` may
+    /// carry more than one number for the same person — the server has
+    /// already deduped to latest-state-per-person — and ContactStore
+    /// matches against the FIRST local CNContact ANY of them resolves to.
+    struct ContactUpdate: Equatable {
+        let phones: [String]
+        let displayName: String?
+        let photoJPEG: Data?
+    }
+
+    /// The `kv_state` key the contact-updates poll cursor is persisted
+    /// under (see `SyncQueueDatabase.getState`/`setState`).
+    static let contactUpdatesCursorKey = "contact_updates_cursor"
+
+    /// Parses one GET `/contact-updates` 200 response body
+    /// (`{"cursor": <int>, "updates": [{"phones": [...], "display_name":
+    /// ..., "photo_thumb": "<base64 JPEG>"|null}, ...]}`). Pure — no
+    /// network — so the happy-path and missing-field shapes are directly
+    /// testable. A row missing `phones` is dropped (nothing to match it
+    /// against); `display_name` is nil when absent or not a string; a
+    /// present-but-invalid-base64 `photo_thumb` degrades to nil (name-only
+    /// update) rather than failing the whole row. Returns nil for a
+    /// malformed body (no top-level `cursor`) — `pullContactUpdates`
+    /// treats that like a network error: cursor left untouched, retried
+    /// next tick.
+    static func parseContactUpdates(json data: Data) -> (cursor: Int, updates: [ContactUpdate])? {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cursor = obj["cursor"] as? Int else { return nil }
+        let rawUpdates = obj["updates"] as? [[String: Any]] ?? []
+        let updates: [ContactUpdate] = rawUpdates.compactMap { row in
+            guard let phones = row["phones"] as? [String], !phones.isEmpty else { return nil }
+            let displayName = row["display_name"] as? String
+            let photoJPEG = (row["photo_thumb"] as? String).flatMap { Data(base64Encoded: $0) }
+            return ContactUpdate(phones: phones, displayName: displayName, photoJPEG: photoJPEG)
+        }
+        return (cursor, updates)
+    }
+
+    /// Pulls console-side NAME/PHOTO edits down to this Mac's Address Book
+    /// (GET `{apiEndpoint}/contact-updates?after=<cursor>`). Applies to ANY
+    /// matching local contact, not just ones already shared to the CRM
+    /// (Stephan's call) — see `ContactStore.applyContactUpdate`. Gated to
+    /// once per `contactUpdatesMinIntervalSeconds`, the same cheap
+    /// time-gate-first pattern `uploadCatalog` uses, since a full tick
+    /// enumerates every local CNContact per matched update.
+    ///
+    /// Cursor persistence: `SyncQueueDatabase`'s `kv_state` table (key
+    /// `contactUpdatesCursorKey`). The new cursor only advances after the
+    /// WHOLE batch has been run through `contactUpdateApplier` — an
+    /// applier returning `false` (no local match, or nothing changed) is a
+    /// legitimate outcome and still advances; a thrown network error or a
+    /// malformed response body does not, so the same batch is re-fetched
+    /// next tick rather than silently skipped. A 404 (legacy backend, no
+    /// contact-updates wire) degrades silently, same convention as
+    /// `pullGate`/`uploadCatalog`/`uploadStaged`.
+    func pullContactUpdates() async {
+        guard let applier = contactUpdateApplier else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        // Cheap time gate FIRST, before touching the sync queue or network.
+        if let last = lastContactUpdatesPollAt, now - last < contactUpdatesMinIntervalSeconds {
+            return
+        }
+        lastContactUpdatesPollAt = now
+
+        let storedCursor = (try? syncQueue.getState(key: Self.contactUpdatesCursorKey)) ?? nil
+        let cursor = storedCursor.flatMap(Int.init) ?? 0
+        guard let url = URL(string: "\(config.apiEndpoint)/contact-updates?after=\(cursor)") else { return }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+
+        let result: (status: Int, body: Data)?
+        if let override = contactUpdatesFetchOverride {
+            result = override(request)
+        } else {
+            do {
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else { return }
+                result = (http.statusCode, data)
+            } catch {
+                crmLog("[CRM] pullContactUpdates: network error: \(error.localizedDescription)")
+                return
+            }
+        }
+        guard let (status, body) = result else {
+            crmLog("[CRM] pullContactUpdates: network error (no response)")
+            return
+        }
+
+        switch status {
+        case 200:
+            guard let (newCursor, updates) = Self.parseContactUpdates(json: body) else {
+                crmLog("[CRM] pullContactUpdates: malformed response, cursor left untouched")
+                return
+            }
+            for update in updates {
+                _ = applier(update.phones, update.displayName, update.photoJPEG)
+            }
+            try? syncQueue.setState(key: Self.contactUpdatesCursorKey, value: String(newCursor))
+        case 404:
+            // Legacy backend: no contact-updates wire. Silent skip, same
+            // convention as pullGate's 404 handling.
+            return
+        default:
+            crmLog("[CRM] pullContactUpdates: HTTP \(status)")
         }
     }
 

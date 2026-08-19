@@ -41,6 +41,14 @@ final class AppState {
         crmService?.contactInfoProvider = { [weak self] phone in
             self?.contactStore.contactInfo(for: phone) ?? (nil, nil)
         }
+        // Contact write-back (S5): console-side NAME/PHOTO edits flow down
+        // to this Mac's Address Book, applied to ANY matching local
+        // contact (not just already-shared ones — Stephan's call).
+        crmService?.contactUpdateApplier = { [weak self] phones, displayName, photoJPEG in
+            self?.contactStore.applyContactUpdate(
+                phones: phones, displayName: displayName, photoJPEG: photoJPEG
+            ) ?? false
+        }
         // Candidate catalog upload: every 1:1 conversation, metadata only.
         crmService?.catalogChatsProvider = { [weak self] in
             try self?.chatDB.fetchCatalog() ?? []

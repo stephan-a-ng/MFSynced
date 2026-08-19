@@ -79,6 +79,13 @@ final class SyncQueueDatabase {
             )
             """
         sqlite3_exec(db, stagedCursorsSQL, nil, nil, nil)
+        let kvStateSQL = """
+            CREATE TABLE IF NOT EXISTS kv_state (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            """
+        sqlite3_exec(db, kvStateSQL, nil, nil, nil)
     }
 
     func enqueue(direction: String, messageGuid: String, phone: String, payload: String) throws {
@@ -269,6 +276,46 @@ final class SyncQueueDatabase {
             )
         }
         return cursors
+    }
+
+    // MARK: - kv_state (scalar sync state, e.g. poll cursors)
+
+    /// Reads one `kv_state` value, or nil when `key` has never been set —
+    /// the signal a poll cursor uses to fall back to its starting value (see
+    /// `CRMSyncService.pullContactUpdates`).
+    func getState(key: String) throws -> String? {
+        guard let db = open() else { throw SyncQueueError.openFailed }
+        defer { sqlite3_close(db) }
+        let sql = "SELECT value FROM kv_state WHERE key = ?"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (key as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        guard let cString = sqlite3_column_text(stmt, 0) else { return nil }
+        return String(cString: cString)
+    }
+
+    /// Upserts one `kv_state` value — called only once a value is confirmed
+    /// ready to persist (e.g. a poll cursor after its whole batch applied
+    /// successfully), never speculatively.
+    func setState(key: String, value: String) throws {
+        guard let db = open() else { throw SyncQueueError.openFailed }
+        defer { sqlite3_close(db) }
+        let sql = """
+            INSERT INTO kv_state (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (key as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, (value as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
     }
 }
 
