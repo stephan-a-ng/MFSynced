@@ -84,13 +84,15 @@ final class CRMSyncService {
     /// catalog upload; injected (ChatDatabase.fetchCatalog()-backed in
     /// production) so the sync service stays testable without a live chat.db.
     var catalogChatsProvider: (() throws -> [ChatCatalogEntry])?
-    /// Fetches one chat's messages for staged upload — nil `afterRowID`
-    /// means "initial backfill, newest `limit`" (ChatDatabase.fetchMessages
-    /// (forChat:limit:)); non-nil means "incremental, ROWID > afterRowID"
-    /// (ChatDatabase.fetchMessages(forChat:afterRowID:limit:)). Injected like
+    /// Fetches one chat's messages for staged upload — the `StagedFetchMode`
+    /// says which of ChatDatabase's three fetch shapes to use: `.backfill`
+    /// → newest `limit` (fetchMessages(forChat:limit:)); `.continueBackfill`
+    /// → newest `limit` older than `beforeRowID` (fetchMessages(forChat:
+    /// limit:beforeRowID:)); `.incremental` → ROWID > afterRowID
+    /// (fetchMessages(forChat:afterRowID:limit:)). Injected like
     /// catalogChatsProvider so the sync service stays testable without a
     /// live chat.db.
-    var stagedMessagesProvider: ((_ chatIdentifier: String, _ afterRowID: Int64?, _ limit: Int) throws -> [Message])?
+    var stagedMessagesProvider: ((_ chatIdentifier: String, _ mode: StagedFetchMode) throws -> [Message])?
     // Internal (not private) for test visibility of retry semantics.
     var pushedContactPhones = Set<String>()
     /// Catalog gating state — in-memory only (telemetry-like: a relaunch
@@ -111,10 +113,12 @@ final class CRMSyncService {
     private var pollTimer: Timer?
     /// Main-thread only (timer closure + main-actor reset).
     private var pollInFlight = false
-    /// Guards uploadStaged() the same way pollInFlight guards poll() itself:
-    /// poll() already serializes every tick, so this only matters if
-    /// something calls uploadStaged() directly while a previous call hasn't
-    /// returned. No lock — same plain-Bool style as its siblings.
+    /// Best-effort re-entrancy guard for uploadStaged() — NOT a mutex, and
+    /// unlike pollInFlight it isn't actually needed for correctness today:
+    /// poll() is the sole caller, and poll() is itself already serialized by
+    /// pollInFlight, so two uploadStaged() calls can never overlap in
+    /// practice. This only protects against a future direct call racing an
+    /// in-flight one. No lock — same plain-Bool style as its siblings.
     private var stagedUploadInFlight = false
     private let session = URLSession.shared
     /// App-process start, for the heartbeat's uptime_seconds.
@@ -666,10 +670,13 @@ final class CRMSyncService {
     }
 
     /// Whether a chat's fetch this tick is an initial backfill (no cursor
-    /// row yet) or incremental (resuming after `afterRowID`), and the
-    /// request size to use either way.
+    /// row yet), a continuation of an in-progress backfill (cursor row with
+    /// `backfillDone == false`), or incremental (cursor row with
+    /// `backfillDone == true`, resuming after `afterRowID`) — and the
+    /// request size/paging boundary to use in each case.
     enum StagedFetchMode: Equatable {
         case backfill(limit: Int)
+        case continueBackfill(beforeRowID: Int64, limit: Int)
         case incremental(afterRowID: Int64, limit: Int)
     }
 
@@ -678,20 +685,34 @@ final class CRMSyncService {
         let mode: StagedFetchMode
     }
 
+    /// The per-chat backfill target: the newest `stagedBackfillWindow`
+    /// messages per chat are staged before a chat ever goes incremental;
+    /// older history is out of scope by design. Equal to `stagedBatchLimit`
+    /// today (both 200), but conceptually distinct — one bounds a single
+    /// POST, the other bounds a chat's total backfill — so they're named
+    /// separately rather than sharing a constant.
+    static let stagedBackfillWindow = 200
+
     /// Which catalog chats get a staged-upload fetch this tick, backfill vs
-    /// incremental, and the request limit for each — decided purely from
-    /// cursor presence (no cursor row ⇒ backfill; cursor row ⇒ incremental)
-    /// and a shared `budget` spent in `chats` order. Gated (already-live-
-    /// synced) chats are excluded entirely: their content already flows
-    /// through pushInbound, so staging it too would be redundant.
+    /// backfill-continuation vs incremental, and the request limit for each
+    /// — decided purely from cursor presence/state (no cursor row ⇒ initial
+    /// backfill; cursor row with backfillDone == false ⇒ continue backfill
+    /// from where it left off; cursor row with backfillDone == true ⇒
+    /// incremental) and a shared `budget` spent in `chats` order. Gated
+    /// (already-live-synced) chats are excluded entirely: their content
+    /// already flows through pushInbound, so staging it too would be
+    /// redundant.
     ///
-    /// A backfill chat's request is capped by `chat.messageCount` (already
-    /// known from the catalog, no extra chat.db round trip) so the budget
-    /// spent on it reflects what will actually come back, letting a second
-    /// chat pick up the leftover in the same tick — e.g. two 150-message
-    /// chats against a 200 budget split 150/50, not 200/0. An incremental
-    /// chat's true row count isn't cheaply knowable ahead of the fetch, so
-    /// it conservatively claims the rest of the tick's budget; any budget it
+    /// A backfill (initial or continuation) chat's request is capped by how
+    /// much of its `stagedBackfillWindow` remains — for an initial backfill
+    /// that's `chat.messageCount` (already known from the catalog, no extra
+    /// chat.db round trip); for a continuation it's `stagedBackfillWindow -
+    /// cursor.backfilledCount`. Capping either way means the budget spent on
+    /// a chat reflects what will actually come back, letting a second chat
+    /// pick up the leftover in the same tick — e.g. two 150-message chats
+    /// against a 200 budget split 150/50, not 200/0. An incremental chat's
+    /// true row count isn't cheaply knowable ahead of the fetch, so it
+    /// conservatively claims the rest of the tick's budget; any budget it
     /// doesn't actually use is simply picked up again next tick (fairness
     /// across ticks is fine — see the module doc).
     static func stagedRowsPlan(
@@ -706,14 +727,25 @@ final class CRMSyncService {
             guard remaining > 0 else { break }
             guard !gated.contains(chat.chatIdentifier) else { continue }
             if let cursor = cursors[chat.chatIdentifier] {
-                let limit = remaining
-                plans.append(StagedFetchPlan(
-                    chatIdentifier: chat.chatIdentifier,
-                    mode: .incremental(afterRowID: cursor.lastRowID, limit: limit)
-                ))
-                remaining -= limit
+                if cursor.backfillDone {
+                    let limit = remaining
+                    plans.append(StagedFetchPlan(
+                        chatIdentifier: chat.chatIdentifier,
+                        mode: .incremental(afterRowID: cursor.lastRowID, limit: limit)
+                    ))
+                    remaining -= limit
+                } else {
+                    let windowRemaining = max(0, stagedBackfillWindow - cursor.backfilledCount)
+                    let limit = min(remaining, windowRemaining)
+                    guard limit > 0 else { continue }
+                    plans.append(StagedFetchPlan(
+                        chatIdentifier: chat.chatIdentifier,
+                        mode: .continueBackfill(beforeRowID: cursor.oldestRowID, limit: limit)
+                    ))
+                    remaining -= limit
+                }
             } else {
-                let limit = min(200, remaining, chat.messageCount)
+                let limit = min(stagedBackfillWindow, remaining, chat.messageCount)
                 guard limit > 0 else { continue }
                 plans.append(StagedFetchPlan(chatIdentifier: chat.chatIdentifier, mode: .backfill(limit: limit)))
                 remaining -= limit
@@ -763,29 +795,116 @@ final class CRMSyncService {
         return ["agent_id": agentID, "messages": messages]
     }
 
-    /// Per-chat new cursor value from a POST's `confirmed` guid list: the max
-    /// rowID among ONLY that chat's confirmed rows. A chat with none of its
-    /// rows confirmed this tick gets no entry here at all — its cursor (or
-    /// lack of one) stays exactly where it was, so every row is re-offered
-    /// next tick rather than silently dropped.
-    static func cursorAdvances(confirmedGuids: Set<String>, rows: [StagedMessageRow]) -> [String: Int64] {
-        var advances: [String: Int64] = [:]
-        for row in rows where confirmedGuids.contains(row.guid) {
-            let current = advances[row.chatIdentifier] ?? Int64.min
-            advances[row.chatIdentifier] = max(current, row.rowID)
+    /// Per-chat new cursor state after a staged-upload tick, from the mode
+    /// each chat was fetched under this tick (from `plan`), which chats'
+    /// CONFIRMED rows advance their progress, and which chats' backfill
+    /// fetch came back with nothing left to page (`exhaustedChats`). Pure —
+    /// no network, no chat.db — so it stays exercisable without a live
+    /// server or database, including the exhausted-chat branch (which
+    /// `uploadStaged` must apply independent of whether its POST even runs,
+    /// since there's nothing to confirm for an exhausted chat).
+    ///
+    /// A chat with none of its rows confirmed this tick, and not exhausted,
+    /// gets no entry here at all — its cursor (or lack of one) stays exactly
+    /// where it was, so every row is re-offered next tick rather than
+    /// silently dropped.
+    ///
+    /// - `exhaustedChats` (continuation fetch returned zero rows — history
+    ///   for that chat is used up before reaching the newest-
+    ///   `stagedBackfillWindow` target): `backfillDone` forced true,
+    ///   `lastRowID`/`oldestRowID`/`backfilledCount` carried over from
+    ///   `existingCursors` unchanged (nothing new was confirmed).
+    /// - `.backfill` (first-ever confirmed batch): `lastRowID`/`oldestRowID`
+    ///   span this tick's confirmed rows, `backfilledCount` = confirmed
+    ///   count, `backfillDone` once that count already reaches
+    ///   `stagedBackfillWindow` or the chat's whole catalog `messageCount`
+    ///   (whichever is known — a chat with fewer than `stagedBackfillWindow`
+    ///   messages total finishes backfill in one batch).
+    /// - `.continueBackfill`: `lastRowID` is left as whatever the initial
+    ///   batch set it to (continuation only pages OLDER messages, so it can
+    ///   never be the newest-seen boundary), `oldestRowID` moves down to
+    ///   this tick's minimum confirmed rowID, `backfilledCount` accumulates
+    ///   onto the prior total, `backfillDone` once the running total reaches
+    ///   `stagedBackfillWindow`.
+    /// - `.incremental`: `lastRowID` advances to this tick's max confirmed
+    ///   rowID (as before this cursor shape existed); `oldestRowID`/
+    ///   `backfilledCount` are irrelevant once `backfillDone` and are simply
+    ///   carried over unchanged.
+    static func cursorUpdates(
+        plan: [StagedFetchPlan],
+        confirmedGuids: Set<String>,
+        rows: [StagedMessageRow],
+        exhaustedChats: Set<String>,
+        existingCursors: [String: StagedCursor],
+        messageCounts: [String: Int]
+    ) -> [String: StagedCursor] {
+        var updates: [String: StagedCursor] = [:]
+
+        for chatIdentifier in exhaustedChats {
+            let existing = existingCursors[chatIdentifier]
+            updates[chatIdentifier] = StagedCursor(
+                lastRowID: existing?.lastRowID ?? 0,
+                oldestRowID: existing?.oldestRowID ?? 0,
+                backfilledCount: existing?.backfilledCount ?? 0,
+                backfillDone: true
+            )
         }
-        return advances
+
+        let modeByChat = Dictionary(uniqueKeysWithValues: plan.map { ($0.chatIdentifier, $0.mode) })
+        var confirmedByChat: [String: [StagedMessageRow]] = [:]
+        for row in rows where confirmedGuids.contains(row.guid) {
+            confirmedByChat[row.chatIdentifier, default: []].append(row)
+        }
+
+        for (chatIdentifier, confirmed) in confirmedByChat {
+            guard let mode = modeByChat[chatIdentifier] else { continue }
+            let confirmedRowIDs = confirmed.map(\.rowID)
+            guard let maxRowID = confirmedRowIDs.max(), let minRowID = confirmedRowIDs.min() else { continue }
+            let existing = existingCursors[chatIdentifier]
+
+            switch mode {
+            case .backfill:
+                let count = confirmed.count
+                let done = count >= stagedBackfillWindow
+                    || (messageCounts[chatIdentifier].map { count >= $0 } ?? false)
+                updates[chatIdentifier] = StagedCursor(
+                    lastRowID: maxRowID,
+                    oldestRowID: minRowID,
+                    backfilledCount: count,
+                    backfillDone: done
+                )
+            case .continueBackfill:
+                let newCount = (existing?.backfilledCount ?? 0) + confirmed.count
+                updates[chatIdentifier] = StagedCursor(
+                    lastRowID: existing?.lastRowID ?? maxRowID,
+                    oldestRowID: minRowID,
+                    backfilledCount: newCount,
+                    backfillDone: newCount >= stagedBackfillWindow
+                )
+            case .incremental:
+                updates[chatIdentifier] = StagedCursor(
+                    lastRowID: maxRowID,
+                    oldestRowID: existing?.oldestRowID ?? maxRowID,
+                    backfilledCount: existing?.backfilledCount ?? 0,
+                    backfillDone: true
+                )
+            }
+        }
+        return updates
     }
 
     /// Continuously uploads conversation content for every non-gated 1:1 chat
     /// to the nexus staging store (POST {apiEndpoint}/staged) so the owner
     /// can review it in the console before opting the number into the live
     /// gate. One POST per tick, bounded to `stagedBatchLimit` rows total —
-    /// see `stagedRowsPlan` for the per-chat backfill/incremental split.
-    /// Cursors only advance for CONFIRMED guids (see `cursorAdvances`); a
-    /// 404 (legacy backend) degrades silently like pullGate, and any other
-    /// failure leaves every cursor untouched so nothing is lost, only
-    /// re-offered.
+    /// see `stagedRowsPlan` for the per-chat backfill/continuation/
+    /// incremental split. Cursors only advance for CONFIRMED guids (see
+    /// `cursorUpdates`); a 404 (legacy backend) degrades silently like
+    /// pullGate, and any other failure leaves every cursor untouched so
+    /// nothing is lost, only re-offered. A backfill-continuation chat whose
+    /// fetch comes back empty (history exhausted before reaching the
+    /// newest-`stagedBackfillWindow` target) is marked done immediately,
+    /// independent of the POST outcome — there is nothing to confirm for it.
     func uploadStaged() async {
         guard !stagedUploadInFlight else { return }
         stagedUploadInFlight = true
@@ -805,16 +924,33 @@ final class CRMSyncService {
         guard !plan.isEmpty else { return }
 
         var allRows: [StagedMessageRow] = []
+        var exhaustedChats: Set<String> = []
         for entry in plan {
-            let messages: [Message]
-            switch entry.mode {
-            case .backfill(let limit):
-                messages = (try? messagesProvider(entry.chatIdentifier, nil, limit)) ?? []
-            case .incremental(let afterRowID, let limit):
-                messages = (try? messagesProvider(entry.chatIdentifier, afterRowID, limit)) ?? []
+            let messages = (try? messagesProvider(entry.chatIdentifier, entry.mode)) ?? []
+            if case .continueBackfill = entry.mode, messages.isEmpty {
+                exhaustedChats.insert(entry.chatIdentifier)
             }
             allRows.append(contentsOf: Self.stagedRows(chatIdentifier: entry.chatIdentifier, messages: messages))
         }
+
+        // History exhausted: nothing to POST or confirm for this chat, so it
+        // must not wait on (or be skipped by) the network call below.
+        if !exhaustedChats.isEmpty {
+            let exhaustedUpdates = Self.cursorUpdates(
+                plan: plan, confirmedGuids: [], rows: [],
+                exhaustedChats: exhaustedChats, existingCursors: cursors, messageCounts: [:]
+            )
+            for (chatIdentifier, cursor) in exhaustedUpdates {
+                try? syncQueue.setStagedCursor(
+                    chatIdentifier: chatIdentifier,
+                    lastRowID: cursor.lastRowID,
+                    oldestRowID: cursor.oldestRowID,
+                    backfilledCount: cursor.backfilledCount,
+                    backfillDone: cursor.backfillDone
+                )
+            }
+        }
+
         guard !allRows.isEmpty else { return }
         // Defensive: the plan bounds per-chat requests to the shared budget,
         // but never exceed the wire's hard per-POST cap.
@@ -836,9 +972,25 @@ final class CRMSyncService {
             case 200:
                 guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let confirmed = json["confirmed"] as? [String] else { return }
-                let advances = Self.cursorAdvances(confirmedGuids: Set(confirmed), rows: rows)
-                for (chatIdentifier, newRowID) in advances {
-                    try? syncQueue.setStagedCursor(newRowID, for: chatIdentifier, backfillDone: true)
+                let messageCounts = Dictionary(
+                    chats.map { ($0.chatIdentifier, $0.messageCount) }, uniquingKeysWith: { first, _ in first }
+                )
+                let updates = Self.cursorUpdates(
+                    plan: plan,
+                    confirmedGuids: Set(confirmed),
+                    rows: rows,
+                    exhaustedChats: [],
+                    existingCursors: cursors,
+                    messageCounts: messageCounts
+                )
+                for (chatIdentifier, cursor) in updates {
+                    try? syncQueue.setStagedCursor(
+                        chatIdentifier: chatIdentifier,
+                        lastRowID: cursor.lastRowID,
+                        oldestRowID: cursor.oldestRowID,
+                        backfilledCount: cursor.backfilledCount,
+                        backfillDone: cursor.backfillDone
+                    )
                 }
             case 404:
                 // Legacy backend: no staged wire. Silent skip, like pullGate.

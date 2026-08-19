@@ -51,22 +51,48 @@ final class SyncQueueDatabaseTests: XCTestCase {
     }
 
     func testStagedCursorRoundTrip() throws {
-        try db.setStagedCursor(42, for: "+1555", backfillDone: true)
+        try db.setStagedCursor(
+            chatIdentifier: "+1555", lastRowID: 42, oldestRowID: 1, backfilledCount: 42, backfillDone: true
+        )
         let cursor = try db.stagedCursor(for: "+1555")
         XCTAssertEqual(cursor?.lastRowID, 42)
+        XCTAssertEqual(cursor?.oldestRowID, 1)
+        XCTAssertEqual(cursor?.backfilledCount, 42)
         XCTAssertEqual(cursor?.backfillDone, true)
     }
 
     func testStagedCursorUpsertOverwritesPreviousValue() throws {
-        try db.setStagedCursor(10, for: "+1555", backfillDone: true)
-        try db.setStagedCursor(25, for: "+1555", backfillDone: true)
+        try db.setStagedCursor(
+            chatIdentifier: "+1555", lastRowID: 10, oldestRowID: 1, backfilledCount: 10, backfillDone: true
+        )
+        try db.setStagedCursor(
+            chatIdentifier: "+1555", lastRowID: 25, oldestRowID: 1, backfilledCount: 25, backfillDone: true
+        )
         let cursor = try db.stagedCursor(for: "+1555")
         XCTAssertEqual(cursor?.lastRowID, 25)
     }
 
+    func testStagedCursorRoundTripPreservesInProgressBackfillFields() throws {
+        // A continuation-in-progress cursor: backfillDone is false, and
+        // oldestRowID/backfilledCount are the fields stagedRowsPlan needs to
+        // resume the backfill window correctly next tick.
+        try db.setStagedCursor(
+            chatIdentifier: "+1555", lastRowID: 300, oldestRowID: 250, backfilledCount: 50, backfillDone: false
+        )
+        let cursor = try db.stagedCursor(for: "+1555")
+        XCTAssertEqual(cursor?.lastRowID, 300)
+        XCTAssertEqual(cursor?.oldestRowID, 250)
+        XCTAssertEqual(cursor?.backfilledCount, 50)
+        XCTAssertEqual(cursor?.backfillDone, false)
+    }
+
     func testAllStagedCursorsReturnsEveryChat() throws {
-        try db.setStagedCursor(5, for: "+1555", backfillDone: true)
-        try db.setStagedCursor(9, for: "+1666", backfillDone: false)
+        try db.setStagedCursor(
+            chatIdentifier: "+1555", lastRowID: 5, oldestRowID: 1, backfilledCount: 5, backfillDone: true
+        )
+        try db.setStagedCursor(
+            chatIdentifier: "+1666", lastRowID: 9, oldestRowID: 1, backfilledCount: 9, backfillDone: false
+        )
         let all = try db.allStagedCursors()
         XCTAssertEqual(all.count, 2)
         XCTAssertEqual(all["+1555"]?.lastRowID, 5)
