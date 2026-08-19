@@ -315,7 +315,11 @@ final class SyncQueueDatabase {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, (key as NSString).utf8String, -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(stmt, 2, (value as NSString).utf8String, -1, SQLITE_TRANSIENT)
-        sqlite3_step(stmt)
+        // A real write failure (disk full, corruption) must throw, not
+        // silently report success — the cursor caller logs it.
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
     }
 }
 

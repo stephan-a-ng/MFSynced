@@ -83,6 +83,11 @@ final class ContactStore {
         NSGraphicsContext.saveGraphicsState()
         defer { NSGraphicsContext.restoreGraphicsState() }
         guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        // save/restoreGraphicsState do NOT restore WHICH context is current —
+        // put the previous one back explicitly or this thread's current
+        // context stays pointed at the discarded bitmap.
+        let previous = NSGraphicsContext.current
+        defer { NSGraphicsContext.current = previous }
         NSGraphicsContext.current = ctx
         ctx.imageInterpolation = .high
         // Aspect-fill: scale so the shorter side matches `edge`, center-crop.

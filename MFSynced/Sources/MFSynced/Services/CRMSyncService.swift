@@ -532,7 +532,13 @@ final class CRMSyncService {
             for update in updates {
                 _ = applier(update.phones, update.displayName, update.photoJPEG)
             }
-            try? syncQueue.setState(key: Self.contactUpdatesCursorKey, value: String(newCursor))
+            do {
+                try syncQueue.setState(key: Self.contactUpdatesCursorKey, value: String(newCursor))
+            } catch {
+                // Reprocessing the batch next tick is idempotent — but a real
+                // persistence fault must not be invisible.
+                crmLog("[contactUpdates] cursor persist failed: \(error)")
+            }
         case 404:
             // Legacy backend: no contact-updates wire. Silent skip, same
             // convention as pullGate's 404 handling.
