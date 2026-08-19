@@ -80,6 +80,15 @@ final class CRMSyncService {
     var chatServiceHint: ((String) -> String?)?
     /// CNContactStore name + JPEG for a phone; injected like chatServiceHint.
     var contactInfoProvider: ((String) -> (name: String?, photoJPEG: Data?))?
+    /// Test seam for `pushContactInfo()`'s `/contacts` POST: when set, the
+    /// request is routed through this closure instead of a real `URLSession`
+    /// call, returning the HTTP status code to react to (nil simulates a
+    /// network failure / no response). Same closure-override DI convention
+    /// as `chatServiceHint`/`contactInfoProvider` — nil in production, so the
+    /// real network path always runs there; tests set it to exercise the
+    /// 200/404/5xx branches without a live endpoint. Internal (not private)
+    /// for test visibility.
+    var contactPushStatusOverride: ((URLRequest) -> Int?)?
     /// Enumerates every 1:1 conversation (metadata only) for the candidate
     /// catalog upload; injected (ChatDatabase.fetchCatalog()-backed in
     /// production) so the sync service stays testable without a live chat.db.
@@ -468,6 +477,20 @@ final class CRMSyncService {
     /// Push CNContactStore name+photo for synced phones the backend hasn't
     /// been given yet this app session. Once per phone per launch: uploads
     /// are ephemeral on the backend, so each launch re-heals the avatars.
+    ///
+    /// Wire reality: the legacy CRM backend implements POST
+    /// {apiEndpoint}/contacts and still needs this push during the
+    /// transition. The nexus does NOT implement it —
+    /// contact_name + photo_thumb already ride along on every chat in the
+    /// S2 candidate-catalog upload (`uploadCatalog`, POST /catalog), and the
+    /// server copies the photo onto the org-side Person at SHARE time, so a
+    /// per-phone push is redundant on that wire. A 404 here means "this
+    /// backend doesn't have the route" — same convention as
+    /// `pullGate`/`uploadLogs`/`uploadCatalog` — so the phone is marked
+    /// pushed (permanent-for-this-launch skip) instead of retried every poll
+    /// tick forever. Any other failure (5xx/network) is presumed transient
+    /// on a backend that DOES implement the route, so it still retries, same
+    /// as before.
     func pushContactInfo() async {
         guard let provider = contactInfoProvider else { return }
         for phone in config.syncedPhoneNumbers where !pushedContactPhones.contains(phone) {
@@ -492,16 +515,34 @@ final class CRMSyncService {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = body
 
-            if let (_, response) = try? await session.data(for: request),
-               let http = response as? HTTPURLResponse, http.statusCode == 200 {
+            switch await contactPushStatusCode(for: request) {
+            case 200:
                 crmLog("[CRM] pushContactInfo: sent \(phone) photo=\(photoJPEG != nil)")
-            } else {
+            case 404:
+                // No /contacts route on this backend (the nexus — catalog +
+                // share-time copy already covers it). Stay marked pushed:
+                // retrying a route that will never appear is pure noise.
+                crmLog("[CRM] pushContactInfo: \(phone) — no /contacts route, not retrying this launch")
+            default:
                 // Retry on a later poll. Deliberate for transient failures
-                // (offline); a permanently-failing backend costs one small
-                // POST per synced phone per poll, accepted.
+                // (offline, or a real legacy-backend outage); a
+                // permanently-failing backend costs one small POST per
+                // synced phone per poll, accepted.
                 pushedContactPhones.remove(phone)
             }
         }
+    }
+
+    /// Performs the `/contacts` POST and returns its HTTP status code (nil
+    /// for a network failure or non-HTTP response). Routes through
+    /// `contactPushStatusOverride` when a test has set one; otherwise runs
+    /// the real `URLSession` call.
+    private func contactPushStatusCode(for request: URLRequest) async -> Int? {
+        if let override = contactPushStatusOverride {
+            return override(request)
+        }
+        guard let (_, response) = try? await session.data(for: request) else { return nil }
+        return (response as? HTTPURLResponse)?.statusCode
     }
 
     /// One 1:1 conversation's enriched metadata, ready for `catalogBody`.
@@ -643,9 +684,14 @@ final class CRMSyncService {
         guard let rawChats = try? provider() else { return }
         let chats: [CatalogChatInput] = rawChats.map { entry in
             let contact = contactInfoProvider?(entry.chatIdentifier)
+            // chat.db stores EMPTY STRING (not NULL) for nearly every 1:1
+            // chat's display_name — `??` alone never fires, and the nexus
+            // requires a non-empty display_name, so "" would 422 the whole
+            // catalog chunk. Empty means absent here.
+            let rawName = entry.displayName ?? ""
             return CatalogChatInput(
                 chatIdentifier: entry.chatIdentifier,
-                displayName: entry.displayName ?? entry.chatIdentifier,
+                displayName: rawName.isEmpty ? entry.chatIdentifier : rawName,
                 contactName: contact?.name,
                 photoJPEG: contact?.photoJPEG,
                 lastActivityAt: entry.lastActivityAt,
@@ -792,12 +838,18 @@ final class CRMSyncService {
             guard !gated.contains(chat.chatIdentifier) else { continue }
             if let cursor = cursors[chat.chatIdentifier] {
                 if cursor.backfillDone {
-                    let limit = remaining
+                    // Incremental probes do NOT consume plan budget: a done,
+                    // quiet chat fetches zero rows, and charging it the
+                    // remaining budget starved every later chat forever
+                    // (observed live: 2 of 1518 chats processed, then a
+                    // permanent zero-row tick loop). The real row budget is
+                    // enforced at POST assembly — rows beyond the batch cap
+                    // are dropped unsent, stay unconfirmed, and re-offer
+                    // next tick.
                     plans.append(StagedFetchPlan(
                         chatIdentifier: chat.chatIdentifier,
-                        mode: .incremental(afterRowID: cursor.lastRowID, limit: limit)
+                        mode: .incremental(afterRowID: cursor.lastRowID, limit: stagedBatchLimit)
                     ))
-                    remaining -= limit
                 } else {
                     let windowRemaining = max(0, stagedBackfillWindow - cursor.backfilledCount)
                     let limit = min(remaining, windowRemaining)
@@ -990,11 +1042,18 @@ final class CRMSyncService {
         var allRows: [StagedMessageRow] = []
         var exhaustedChats: Set<String> = []
         for entry in plan {
+            // The POST-side row budget: incremental plan entries are
+            // budget-free probes, so the total is enforced here instead.
+            // Rows beyond the cap are never fetched/sent; unconfirmed means
+            // their cursors don't advance, so they re-offer next tick.
+            if allRows.count >= Self.stagedBatchLimit { break }
             let messages = (try? messagesProvider(entry.chatIdentifier, entry.mode)) ?? []
             if case .continueBackfill = entry.mode, messages.isEmpty {
                 exhaustedChats.insert(entry.chatIdentifier)
             }
-            allRows.append(contentsOf: Self.stagedRows(chatIdentifier: entry.chatIdentifier, messages: messages))
+            let rows = Self.stagedRows(chatIdentifier: entry.chatIdentifier, messages: messages)
+            let room = Self.stagedBatchLimit - allRows.count
+            allRows.append(contentsOf: rows.prefix(room))
         }
 
         // History exhausted: nothing to POST or confirm for this chat, so it

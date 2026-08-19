@@ -189,6 +189,34 @@ final class CRMSyncStagedTests: XCTestCase {
 
     // MARK: - stagedRowsPlan (backfill continuation — FINDING 1)
 
+    func testStagedRowsPlanQuietDoneChatDoesNotStarveLaterChats() {
+        // Observed live: the first catalog chat was backfill-done with no
+        // new messages, and its incremental entry consumed the ENTIRE tick
+        // budget — 2 of 1518 chats ever processed, zero-row POSTs forever.
+        // Incremental probes must be budget-free so later chats still get
+        // their backfill slots in the same tick.
+        let chats = [
+            ChatCatalogEntry(chatIdentifier: "+1DONE", displayName: nil, lastActivityAt: nil, messageCount: 300),
+            ChatCatalogEntry(chatIdentifier: "+1NEW", displayName: nil, lastActivityAt: nil, messageCount: 120),
+        ]
+        let cursors = [
+            "+1DONE": StagedCursor(lastRowID: 5_000, oldestRowID: 4_000, backfilledCount: 200, backfillDone: true)
+        ]
+
+        let plan = CRMSyncService.stagedRowsPlan(
+            chats: chats, cursors: cursors, gated: [], budget: 200
+        )
+
+        XCTAssertEqual(plan.count, 2)
+        guard case .incremental = plan[0].mode else {
+            return XCTFail("expected incremental probe for the done chat")
+        }
+        guard case .backfill(let limit) = plan[1].mode else {
+            return XCTFail("the fresh chat must still get its backfill slot")
+        }
+        XCTAssertEqual(limit, 120)
+    }
+
     func testStagedRowsPlanContinuesBackfillWhenCursorExistsButNotDone() {
         // A cursor with backfillDone == false — a chat mid-way through its
         // newest-200 window (see FINDING 1) — must resume the backfill from
@@ -610,7 +638,16 @@ final class CRMSyncStagedTests: XCTestCase {
     // same pattern as CRMSyncCatalogTests: no live server, just proving the
     // provider + DI (dependency injection) hooks are wired correctly end to end).
 
-    private func makeService(synced: Set<String> = [], syncQueue: SyncQueueDatabase = SyncQueueDatabase()) -> CRMSyncService {
+    private func makeService(
+        synced: Set<String> = [],
+        // NEVER default to SyncQueueDatabase() here: the no-path init opens
+        // the user's REAL Application Support database, and a test run then
+        // writes schema/rows into live data (this happened — an old-schema
+        // staged_cursors table landed in the real sync_queue.db).
+        syncQueue: SyncQueueDatabase = SyncQueueDatabase(
+            path: NSTemporaryDirectory() + "test_svc_\(UUID().uuidString).db"
+        )
+    ) -> CRMSyncService {
         var config = CRMConfig()
         config.isEnabled = true
         // Fast-fail endpoint: connection refused immediately, no network wait.
