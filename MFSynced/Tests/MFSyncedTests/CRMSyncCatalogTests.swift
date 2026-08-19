@@ -184,7 +184,7 @@ final class CRMSyncCatalogTests: XCTestCase {
 
     // MARK: - uploadCatalog() wiring (real async path, fast-fail endpoint —
     // same pattern as CRMSyncContactPushTests: no live server, just proving
-    // the gate + DI hooks are wired correctly end to end).
+    // the gate + DI (dependency injection) hooks are wired correctly end to end).
 
     private func makeService() -> CRMSyncService {
         var config = CRMConfig()

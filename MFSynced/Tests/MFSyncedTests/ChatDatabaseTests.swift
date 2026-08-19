@@ -51,7 +51,7 @@ final class ChatDatabaseTests: XCTestCase {
         XCTAssertFalse(results.isEmpty)
     }
 
-    func testFetchConversationsExcludesGroupChats() throws {
+    func testFetchCatalogExcludesGroupChats() throws {
         guard db != nil else { throw XCTSkip("chat.db not available") }
         // fetchConversations()'s existing convention (Conversation.isGroup /
         // Message.isGroup) is chat.style == 43 for a group; fetchCatalog()
@@ -71,7 +71,7 @@ final class ChatDatabaseTests: XCTestCase {
         )
     }
 
-    func testFetchConversationsIncludesMessageCount() throws {
+    func testFetchCatalogIncludesMessageCount() throws {
         guard db != nil else { throw XCTSkip("chat.db not available") }
         let catalog = try db.fetchCatalog()
         guard !catalog.isEmpty else { throw XCTSkip("no 1:1 conversations on this Mac") }

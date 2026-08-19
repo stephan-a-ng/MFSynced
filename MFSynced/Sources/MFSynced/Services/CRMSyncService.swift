@@ -550,6 +550,12 @@ final class CRMSyncService {
     func uploadCatalog() async {
         guard let provider = catalogChatsProvider else { return }
         let now = ProcessInfo.processInfo.systemUptime
+        // Cheap time gate FIRST: the chat.db scan and per-chat contact/photo
+        // enrichment below are far more expensive than the POST they feed, so
+        // they must sit behind the same 60s floor — not run every poll tick.
+        if let last = lastCatalogUploadAt, now - last < catalogMinIntervalSeconds {
+            return
+        }
 
         guard let rawChats = try? provider() else { return }
         let chats: [CatalogChatInput] = rawChats.map { entry in
