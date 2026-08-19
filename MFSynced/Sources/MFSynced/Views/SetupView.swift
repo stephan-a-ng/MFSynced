@@ -8,6 +8,7 @@ struct SetupView: View {
     @State private var step: Step = .checkingPermission
     @State private var apiEndpoint: String = ""
     @State private var apiKey: String = ""
+    @State private var ownerEmail: String = ""
     @State private var isCheckingDB = false
 
     enum Step {
@@ -170,6 +171,18 @@ struct SetupView: View {
                 Text("You can find your API key in the web portal under Settings → Mac App.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Owner email")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                    TextField("you@example.com", text: $ownerEmail)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                Text("The Message console account that owns this Mac's sync decisions.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
             }
         } else {
             Text("Complete step 1 first")
@@ -230,6 +243,7 @@ struct SetupView: View {
                     let existing = CRMConfig.load()
                     apiEndpoint = existing.apiEndpoint
                     apiKey = existing.apiKey
+                    ownerEmail = existing.ownerEmail
                     step = .configureCRM
                 } else {
                     step = .needsPermission
@@ -246,6 +260,7 @@ struct SetupView: View {
         var config = CRMConfig.load()
         config.apiEndpoint = apiEndpoint
         config.apiKey = apiKey
+        config.ownerEmail = ownerEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         config.isEnabled = !apiEndpoint.isEmpty && !apiKey.isEmpty
         config.save()
     }
