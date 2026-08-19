@@ -838,12 +838,18 @@ final class CRMSyncService {
             guard !gated.contains(chat.chatIdentifier) else { continue }
             if let cursor = cursors[chat.chatIdentifier] {
                 if cursor.backfillDone {
-                    let limit = remaining
+                    // Incremental probes do NOT consume plan budget: a done,
+                    // quiet chat fetches zero rows, and charging it the
+                    // remaining budget starved every later chat forever
+                    // (observed live: 2 of 1518 chats processed, then a
+                    // permanent zero-row tick loop). The real row budget is
+                    // enforced at POST assembly — rows beyond the batch cap
+                    // are dropped unsent, stay unconfirmed, and re-offer
+                    // next tick.
                     plans.append(StagedFetchPlan(
                         chatIdentifier: chat.chatIdentifier,
-                        mode: .incremental(afterRowID: cursor.lastRowID, limit: limit)
+                        mode: .incremental(afterRowID: cursor.lastRowID, limit: stagedBatchLimit)
                     ))
-                    remaining -= limit
                 } else {
                     let windowRemaining = max(0, stagedBackfillWindow - cursor.backfilledCount)
                     let limit = min(remaining, windowRemaining)
@@ -1036,11 +1042,18 @@ final class CRMSyncService {
         var allRows: [StagedMessageRow] = []
         var exhaustedChats: Set<String> = []
         for entry in plan {
+            // The POST-side row budget: incremental plan entries are
+            // budget-free probes, so the total is enforced here instead.
+            // Rows beyond the cap are never fetched/sent; unconfirmed means
+            // their cursors don't advance, so they re-offer next tick.
+            if allRows.count >= Self.stagedBatchLimit { break }
             let messages = (try? messagesProvider(entry.chatIdentifier, entry.mode)) ?? []
             if case .continueBackfill = entry.mode, messages.isEmpty {
                 exhaustedChats.insert(entry.chatIdentifier)
             }
-            allRows.append(contentsOf: Self.stagedRows(chatIdentifier: entry.chatIdentifier, messages: messages))
+            let rows = Self.stagedRows(chatIdentifier: entry.chatIdentifier, messages: messages)
+            let room = Self.stagedBatchLimit - allRows.count
+            allRows.append(contentsOf: rows.prefix(room))
         }
 
         // History exhausted: nothing to POST or confirm for this chat, so it
