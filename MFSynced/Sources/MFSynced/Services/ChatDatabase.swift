@@ -118,6 +118,48 @@ final class ChatDatabase {
         return parseMessageRows(stmt).reversed()
     }
 
+    /// Incremental staged-upload fetch: one chat's messages with ROWID
+    /// strictly greater than `afterRowID`, oldest-first, capped at `limit` —
+    /// same JOIN shape as fetchMessages(forChat:limit:beforeRowID:), but
+    /// bounded going forward from a cursor instead of paging backward from
+    /// "now", so parseMessageRows' natural ROWID ASC order is returned as-is
+    /// (no `.reversed()` needed).
+    func fetchMessages(forChat chatIdentifier: String, afterRowID: Int64, limit: Int) throws -> [Message] {
+        let db = try openConnection()
+        defer { sqlite3_close(db) }
+
+        let sql = """
+            SELECT m.ROWID AS message_id, m.guid, m.text, m.attributedBody,
+                m.is_from_me, m.date AS message_date, m.date_edited,
+                m.associated_message_type, m.associated_message_emoji,
+                m.cache_has_attachments, m.service,
+                h.id AS sender_id,
+                c.chat_identifier, c.display_name, c.style AS chat_style,
+                GROUP_CONCAT(DISTINCT a.transfer_name) AS attachment_names,
+                GROUP_CONCAT(DISTINCT a.mime_type) AS attachment_types
+            FROM message m
+            LEFT JOIN handle h ON m.handle_id = h.ROWID
+            LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
+            LEFT JOIN chat c ON cmj.chat_id = c.ROWID
+            LEFT JOIN message_attachment_join maj ON m.ROWID = maj.message_id
+            LEFT JOIN attachment a ON maj.attachment_id = a.ROWID
+            WHERE c.chat_identifier = ? AND m.ROWID > ?
+            GROUP BY m.ROWID ORDER BY m.ROWID ASC LIMIT ?
+            """
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw ChatDBError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_text(stmt, 1, (chatIdentifier as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int64(stmt, 2, afterRowID)
+        sqlite3_bind_int(stmt, 3, Int32(limit))
+
+        return parseMessageRows(stmt)
+    }
+
     /// The Messages service a chat lives on ("iMessage", "SMS" (Short Message
     /// Service), "RCS" (Rich Communication Services)...),
     /// or nil for an unknown identifier. Drives outbound service selection:
