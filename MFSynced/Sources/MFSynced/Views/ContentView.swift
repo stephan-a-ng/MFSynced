@@ -45,6 +45,16 @@ final class AppState {
         crmService?.catalogChatsProvider = { [weak self] in
             try self?.chatDB.fetchCatalog() ?? []
         }
+        // Staged content upload: per-chat backfill (no cursor yet) or
+        // incremental (resuming after a cursor) fetch, driven by
+        // CRMSyncService.stagedRowsPlan.
+        crmService?.stagedMessagesProvider = { [weak self] chatIdentifier, afterRowID, limit in
+            guard let self else { return [] }
+            if let afterRowID {
+                return try self.chatDB.fetchMessages(forChat: chatIdentifier, afterRowID: afterRowID, limit: limit)
+            }
+            return try self.chatDB.fetchMessages(forChat: chatIdentifier, limit: limit)
+        }
         crmService?.chatMaxRowID = { [weak self] in
             (try? self?.chatDB.getMaxRowID()) ?? 0
         }

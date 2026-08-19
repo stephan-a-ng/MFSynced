@@ -12,6 +12,16 @@ struct QueueEntry {
     let nextRetryAt: Date
 }
 
+/// One chat's staged-upload progress: `lastRowID` is the chat.db ROWID
+/// through which every message has already been confirmed by the nexus
+/// staging endpoint. Absence of a row entirely (not this struct — see
+/// `SyncQueueDatabase.stagedCursor(for:)` returning nil) is what tells
+/// CRMSyncService.stagedRowsPlan a chat still needs its initial backfill.
+struct StagedCursor {
+    let lastRowID: Int64
+    let backfillDone: Bool
+}
+
 final class SyncQueueDatabase {
     private let path: String
 
@@ -49,6 +59,14 @@ final class SyncQueueDatabase {
             )
             """
         sqlite3_exec(db, sql, nil, nil, nil)
+        let stagedCursorsSQL = """
+            CREATE TABLE IF NOT EXISTS staged_cursors (
+                chat_identifier TEXT PRIMARY KEY,
+                last_row_id INTEGER NOT NULL,
+                backfill_done INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        sqlite3_exec(db, stagedCursorsSQL, nil, nil, nil)
     }
 
     func enqueue(direction: String, messageGuid: String, phone: String, payload: String) throws {
@@ -153,6 +171,72 @@ final class SyncQueueDatabase {
         sqlite3_bind_text(stmt, 1, (direction as NSString).utf8String, -1, nil)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int(stmt, 0))
+    }
+
+    /// The staged-upload cursor for one chat, or nil when that chat has
+    /// never had a confirmed staged row — the signal CRMSyncService.
+    /// stagedRowsPlan uses to pick INITIAL BACKFILL over incremental.
+    func stagedCursor(for chatIdentifier: String) throws -> StagedCursor? {
+        guard let db = open() else { throw SyncQueueError.openFailed }
+        defer { sqlite3_close(db) }
+        let sql = "SELECT last_row_id, backfill_done FROM staged_cursors WHERE chat_identifier = ?"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (chatIdentifier as NSString).utf8String, -1, nil)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return StagedCursor(
+            lastRowID: sqlite3_column_int64(stmt, 0),
+            backfillDone: sqlite3_column_int(stmt, 1) != 0
+        )
+    }
+
+    /// Upserts one chat's staged-upload cursor — called only after the nexus
+    /// has CONFIRMED the rows up through `lastRowID`, never speculatively.
+    func setStagedCursor(_ lastRowID: Int64, for chatIdentifier: String, backfillDone: Bool) throws {
+        guard let db = open() else { throw SyncQueueError.openFailed }
+        defer { sqlite3_close(db) }
+        let sql = """
+            INSERT INTO staged_cursors (chat_identifier, last_row_id, backfill_done)
+            VALUES (?, ?, ?)
+            ON CONFLICT(chat_identifier) DO UPDATE SET
+                last_row_id = excluded.last_row_id,
+                backfill_done = excluded.backfill_done
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (chatIdentifier as NSString).utf8String, -1, nil)
+        sqlite3_bind_int64(stmt, 2, lastRowID)
+        sqlite3_bind_int(stmt, 3, backfillDone ? 1 : 0)
+        sqlite3_step(stmt)
+    }
+
+    /// Every chat's staged-upload cursor, keyed by chat_identifier — the
+    /// full picture stagedRowsPlan needs to decide backfill vs incremental
+    /// for every catalog chat in one pass.
+    func allStagedCursors() throws -> [String: StagedCursor] {
+        guard let db = open() else { throw SyncQueueError.openFailed }
+        defer { sqlite3_close(db) }
+        let sql = "SELECT chat_identifier, last_row_id, backfill_done FROM staged_cursors"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var cursors: [String: StagedCursor] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let identifier = String(cString: sqlite3_column_text(stmt, 0))
+            cursors[identifier] = StagedCursor(
+                lastRowID: sqlite3_column_int64(stmt, 1),
+                backfillDone: sqlite3_column_int(stmt, 2) != 0
+            )
+        }
+        return cursors
     }
 }
 

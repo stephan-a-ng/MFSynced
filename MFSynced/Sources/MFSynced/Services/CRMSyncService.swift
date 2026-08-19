@@ -84,6 +84,13 @@ final class CRMSyncService {
     /// catalog upload; injected (ChatDatabase.fetchCatalog()-backed in
     /// production) so the sync service stays testable without a live chat.db.
     var catalogChatsProvider: (() throws -> [ChatCatalogEntry])?
+    /// Fetches one chat's messages for staged upload — nil `afterRowID`
+    /// means "initial backfill, newest `limit`" (ChatDatabase.fetchMessages
+    /// (forChat:limit:)); non-nil means "incremental, ROWID > afterRowID"
+    /// (ChatDatabase.fetchMessages(forChat:afterRowID:limit:)). Injected like
+    /// catalogChatsProvider so the sync service stays testable without a
+    /// live chat.db.
+    var stagedMessagesProvider: ((_ chatIdentifier: String, _ afterRowID: Int64?, _ limit: Int) throws -> [Message])?
     // Internal (not private) for test visibility of retry semantics.
     var pushedContactPhones = Set<String>()
     /// Catalog gating state — in-memory only (telemetry-like: a relaunch
@@ -104,6 +111,11 @@ final class CRMSyncService {
     private var pollTimer: Timer?
     /// Main-thread only (timer closure + main-actor reset).
     private var pollInFlight = false
+    /// Guards uploadStaged() the same way pollInFlight guards poll() itself:
+    /// poll() already serializes every tick, so this only matters if
+    /// something calls uploadStaged() directly while a previous call hasn't
+    /// returned. No lock — same plain-Bool style as its siblings.
+    private var stagedUploadInFlight = false
     private let session = URLSession.shared
     /// App-process start, for the heartbeat's uptime_seconds.
     private let launchedAt = Date()
@@ -185,6 +197,9 @@ final class CRMSyncService {
         // telemetry for the console review tab, not part of the send/receive
         // path.
         await uploadCatalog()
+        // Last of all: staged content upload is background console-review
+        // material for non-gated chats, never part of the send/receive path.
+        await uploadStaged()
     }
 
     /// Drain one batch of buffered crmLog lines to the nexus
@@ -627,6 +642,212 @@ final class CRMSyncService {
         if succeeded {
             lastCatalogFingerprint = fingerprint
             lastCatalogSuccessAt = now
+        }
+    }
+
+    // MARK: - Staged content upload (S3)
+
+    /// Rows per POST for uploadStaged, and the total per-tick fetch budget
+    /// spent across all chats — kept equal since this service does exactly
+    /// one POST per poll tick and the wire caps a POST at 200 rows.
+    static let stagedBatchLimit = 200
+
+    /// One wire-ready staged message row. `rowID` is bookkeeping only (chat.db
+    /// ROWID, for cursor advancement) — it is never sent on the wire, only
+    /// the guid identifies a row to the server.
+    struct StagedMessageRow: Equatable {
+        let chatIdentifier: String
+        let guid: String
+        let sender: String?
+        let isFromMe: Bool
+        let body: String
+        let sentAt: Date
+        let rowID: Int64
+    }
+
+    /// Whether a chat's fetch this tick is an initial backfill (no cursor
+    /// row yet) or incremental (resuming after `afterRowID`), and the
+    /// request size to use either way.
+    enum StagedFetchMode: Equatable {
+        case backfill(limit: Int)
+        case incremental(afterRowID: Int64, limit: Int)
+    }
+
+    struct StagedFetchPlan: Equatable {
+        let chatIdentifier: String
+        let mode: StagedFetchMode
+    }
+
+    /// Which catalog chats get a staged-upload fetch this tick, backfill vs
+    /// incremental, and the request limit for each — decided purely from
+    /// cursor presence (no cursor row ⇒ backfill; cursor row ⇒ incremental)
+    /// and a shared `budget` spent in `chats` order. Gated (already-live-
+    /// synced) chats are excluded entirely: their content already flows
+    /// through pushInbound, so staging it too would be redundant.
+    ///
+    /// A backfill chat's request is capped by `chat.messageCount` (already
+    /// known from the catalog, no extra chat.db round trip) so the budget
+    /// spent on it reflects what will actually come back, letting a second
+    /// chat pick up the leftover in the same tick — e.g. two 150-message
+    /// chats against a 200 budget split 150/50, not 200/0. An incremental
+    /// chat's true row count isn't cheaply knowable ahead of the fetch, so
+    /// it conservatively claims the rest of the tick's budget; any budget it
+    /// doesn't actually use is simply picked up again next tick (fairness
+    /// across ticks is fine — see the module doc).
+    static func stagedRowsPlan(
+        chats: [ChatCatalogEntry],
+        cursors: [String: StagedCursor],
+        gated: Set<String>,
+        budget: Int
+    ) -> [StagedFetchPlan] {
+        var plans: [StagedFetchPlan] = []
+        var remaining = budget
+        for chat in chats {
+            guard remaining > 0 else { break }
+            guard !gated.contains(chat.chatIdentifier) else { continue }
+            if let cursor = cursors[chat.chatIdentifier] {
+                let limit = remaining
+                plans.append(StagedFetchPlan(
+                    chatIdentifier: chat.chatIdentifier,
+                    mode: .incremental(afterRowID: cursor.lastRowID, limit: limit)
+                ))
+                remaining -= limit
+            } else {
+                let limit = min(200, remaining, chat.messageCount)
+                guard limit > 0 else { continue }
+                plans.append(StagedFetchPlan(chatIdentifier: chat.chatIdentifier, mode: .backfill(limit: limit)))
+                remaining -= limit
+            }
+        }
+        return plans
+    }
+
+    /// Converts one chat's already-fetched chat.db messages into wire rows,
+    /// skipping messages with no displayable body (tapbacks, empty/whitespace
+    /// text with no attributedBody fallback) — a row with nothing to show the
+    /// owner in the console isn't worth a slot in the 200-row budget. Pure:
+    /// takes already-fetched Message values, no chat.db access.
+    static func stagedRows(chatIdentifier: String, messages: [Message]) -> [StagedMessageRow] {
+        messages.compactMap { msg in
+            guard let body = msg.displayText, !body.isEmpty else { return nil }
+            return StagedMessageRow(
+                chatIdentifier: chatIdentifier,
+                guid: msg.guid,
+                sender: msg.senderID,
+                isFromMe: msg.isFromMe,
+                body: body,
+                sentAt: msg.date,
+                rowID: msg.id
+            )
+        }
+    }
+
+    /// Builds the POST body ({"agent_id", "messages": [...]}) for `rows`.
+    /// Pure and static like `catalogBody`/`heartbeatBody`: production
+    /// supplies real chat.db rows, tests assert on the dict directly.
+    static func stagedBody(agentID: String, rows: [StagedMessageRow]) -> [String: Any] {
+        let iso = ISO8601DateFormatter()
+        let messages: [[String: Any]] = rows.map { row in
+            var dict: [String: Any] = [
+                "chat_identifier": row.chatIdentifier,
+                "guid": row.guid,
+                "is_from_me": row.isFromMe,
+                "body": row.body,
+                "sent_at": iso.string(from: row.sentAt),
+            ]
+            if let sender = row.sender {
+                dict["sender"] = sender
+            }
+            return dict
+        }
+        return ["agent_id": agentID, "messages": messages]
+    }
+
+    /// Per-chat new cursor value from a POST's `confirmed` guid list: the max
+    /// rowID among ONLY that chat's confirmed rows. A chat with none of its
+    /// rows confirmed this tick gets no entry here at all — its cursor (or
+    /// lack of one) stays exactly where it was, so every row is re-offered
+    /// next tick rather than silently dropped.
+    static func cursorAdvances(confirmedGuids: Set<String>, rows: [StagedMessageRow]) -> [String: Int64] {
+        var advances: [String: Int64] = [:]
+        for row in rows where confirmedGuids.contains(row.guid) {
+            let current = advances[row.chatIdentifier] ?? Int64.min
+            advances[row.chatIdentifier] = max(current, row.rowID)
+        }
+        return advances
+    }
+
+    /// Continuously uploads conversation content for every non-gated 1:1 chat
+    /// to the nexus staging store (POST {apiEndpoint}/staged) so the owner
+    /// can review it in the console before opting the number into the live
+    /// gate. One POST per tick, bounded to `stagedBatchLimit` rows total —
+    /// see `stagedRowsPlan` for the per-chat backfill/incremental split.
+    /// Cursors only advance for CONFIRMED guids (see `cursorAdvances`); a
+    /// 404 (legacy backend) degrades silently like pullGate, and any other
+    /// failure leaves every cursor untouched so nothing is lost, only
+    /// re-offered.
+    func uploadStaged() async {
+        guard !stagedUploadInFlight else { return }
+        stagedUploadInFlight = true
+        defer { stagedUploadInFlight = false }
+
+        guard let catalogProvider = catalogChatsProvider,
+              let messagesProvider = stagedMessagesProvider else { return }
+        guard let chats = try? catalogProvider(), !chats.isEmpty else { return }
+
+        let cursors = (try? syncQueue.allStagedCursors()) ?? [:]
+        let plan = Self.stagedRowsPlan(
+            chats: chats,
+            cursors: cursors,
+            gated: config.syncedPhoneNumbers,
+            budget: Self.stagedBatchLimit
+        )
+        guard !plan.isEmpty else { return }
+
+        var allRows: [StagedMessageRow] = []
+        for entry in plan {
+            let messages: [Message]
+            switch entry.mode {
+            case .backfill(let limit):
+                messages = (try? messagesProvider(entry.chatIdentifier, nil, limit)) ?? []
+            case .incremental(let afterRowID, let limit):
+                messages = (try? messagesProvider(entry.chatIdentifier, afterRowID, limit)) ?? []
+            }
+            allRows.append(contentsOf: Self.stagedRows(chatIdentifier: entry.chatIdentifier, messages: messages))
+        }
+        guard !allRows.isEmpty else { return }
+        // Defensive: the plan bounds per-chat requests to the shared budget,
+        // but never exceed the wire's hard per-POST cap.
+        let rows = Array(allRows.prefix(Self.stagedBatchLimit))
+
+        guard let url = URL(string: "\(config.apiEndpoint)/staged") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(
+            withJSONObject: Self.stagedBody(agentID: config.agentID, rows: rows)
+        )
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return }
+            switch http.statusCode {
+            case 200:
+                guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let confirmed = json["confirmed"] as? [String] else { return }
+                let advances = Self.cursorAdvances(confirmedGuids: Set(confirmed), rows: rows)
+                for (chatIdentifier, newRowID) in advances {
+                    try? syncQueue.setStagedCursor(newRowID, for: chatIdentifier, backfillDone: true)
+                }
+            case 404:
+                // Legacy backend: no staged wire. Silent skip, like pullGate.
+                return
+            default:
+                crmLog("[CRM] uploadStaged: HTTP \(http.statusCode)")
+            }
+        } catch {
+            crmLog("[CRM] uploadStaged: network error: \(error.localizedDescription)")
         }
     }
 

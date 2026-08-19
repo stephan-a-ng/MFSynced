@@ -43,4 +43,34 @@ final class SyncQueueDatabaseTests: XCTestCase {
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending[0].retryCount, 1)
     }
+
+    // MARK: - Staged cursors (S3)
+
+    func testStagedCursorMissingByDefault() throws {
+        XCTAssertNil(try db.stagedCursor(for: "+1555"))
+    }
+
+    func testStagedCursorRoundTrip() throws {
+        try db.setStagedCursor(42, for: "+1555", backfillDone: true)
+        let cursor = try db.stagedCursor(for: "+1555")
+        XCTAssertEqual(cursor?.lastRowID, 42)
+        XCTAssertEqual(cursor?.backfillDone, true)
+    }
+
+    func testStagedCursorUpsertOverwritesPreviousValue() throws {
+        try db.setStagedCursor(10, for: "+1555", backfillDone: true)
+        try db.setStagedCursor(25, for: "+1555", backfillDone: true)
+        let cursor = try db.stagedCursor(for: "+1555")
+        XCTAssertEqual(cursor?.lastRowID, 25)
+    }
+
+    func testAllStagedCursorsReturnsEveryChat() throws {
+        try db.setStagedCursor(5, for: "+1555", backfillDone: true)
+        try db.setStagedCursor(9, for: "+1666", backfillDone: false)
+        let all = try db.allStagedCursors()
+        XCTAssertEqual(all.count, 2)
+        XCTAssertEqual(all["+1555"]?.lastRowID, 5)
+        XCTAssertEqual(all["+1666"]?.lastRowID, 9)
+        XCTAssertEqual(all["+1666"]?.backfillDone, false)
+    }
 }
