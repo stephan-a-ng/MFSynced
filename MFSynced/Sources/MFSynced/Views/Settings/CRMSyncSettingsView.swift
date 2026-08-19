@@ -9,6 +9,10 @@ struct CRMSyncSettingsView: View {
                 Toggle("CRM Sync Enabled", isOn: $config.isEnabled)
                 TextField("API Endpoint", text: $config.apiEndpoint, prompt: Text("https://your-backend.com/v1/agent"))
                 SecureField("API Key", text: $config.apiKey, prompt: Text("mf_sk_..."))
+                TextField("Owner Email", text: $config.ownerEmail, prompt: Text("you@example.com"))
+                Text("The Message console account that owns this Mac's sync decisions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Mirror Backend (optional)") {
@@ -61,6 +65,7 @@ struct CRMSyncSettingsView: View {
         .onChange(of: config.isEnabled) { config.save() }
         .onChange(of: config.apiEndpoint) { config.save() }
         .onChange(of: config.apiKey) { config.save() }
+        .onChange(of: config.ownerEmail) { config.save() }
         .onChange(of: config.pollIntervalSeconds) { config.save() }
         .onChange(of: config.mirrorApiEndpoint) { config.save() }
         .onChange(of: config.mirrorApiKey) { config.save() }

@@ -305,19 +305,47 @@ final class CRMSyncService {
     /// message sync, and an old backend that 404s the route costs nothing.
     /// Every field is optional on the wire; the server samples what it
     /// forwards to the datalake, so sending each poll tick is fine.
-    func sendHeartbeat() async {
-        guard let url = URL(string: "\(config.apiEndpoint)/heartbeat") else { return }
+    /// Builds the heartbeat JSON body from config + live process values.
+    /// Pure and static on purpose: sendHeartbeat() supplies the real
+    /// hostname/uptime/etc, tests supply fixed values and assert on the
+    /// dict directly, without a network call in the loop.
+    static func heartbeatBody(
+        config: CRMConfig,
+        hostname: String,
+        osVersion: String,
+        uptimeSeconds: Int,
+        appVersion: String?
+    ) -> [String: Any] {
         var body: [String: Any] = [
             "agent_id": config.agentID,
-            "hostname": Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
-            "os_version": ProcessInfo.processInfo.operatingSystemVersionString,
+            "hostname": hostname,
+            "os_version": osVersion,
             "poll_interval_seconds": max(1, Int(config.pollIntervalSeconds)),
-            "uptime_seconds": max(0, Int(Date().timeIntervalSince(launchedAt))),
+            "uptime_seconds": max(0, uptimeSeconds),
             "gate_applied": Array(config.syncedPhoneNumbers).sorted(),
         ]
-        if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
-            body["app_version"] = version
+        if let appVersion {
+            body["app_version"] = appVersion
         }
+        // Omitted (not sent as empty) when unset: an absent key is a no-op
+        // for the backend's first-claim-wins owner assignment, while an
+        // empty string could be mistaken for an explicit clear.
+        let trimmedOwnerEmail = config.ownerEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedOwnerEmail.isEmpty {
+            body["owner_email"] = trimmedOwnerEmail
+        }
+        return body
+    }
+
+    func sendHeartbeat() async {
+        guard let url = URL(string: "\(config.apiEndpoint)/heartbeat") else { return }
+        let body = Self.heartbeatBody(
+            config: config,
+            hostname: Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
+            osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
+            uptimeSeconds: Int(Date().timeIntervalSince(launchedAt)),
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+        )
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
