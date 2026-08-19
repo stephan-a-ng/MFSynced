@@ -80,8 +80,21 @@ final class CRMSyncService {
     var chatServiceHint: ((String) -> String?)?
     /// CNContactStore name + JPEG for a phone; injected like chatServiceHint.
     var contactInfoProvider: ((String) -> (name: String?, photoJPEG: Data?))?
+    /// Enumerates every 1:1 conversation (metadata only) for the candidate
+    /// catalog upload; injected (ChatDatabase.fetchCatalog()-backed in
+    /// production) so the sync service stays testable without a live chat.db.
+    var catalogChatsProvider: (() throws -> [ChatCatalogEntry])?
     // Internal (not private) for test visibility of retry semantics.
     var pushedContactPhones = Set<String>()
+    /// Catalog gating state — in-memory only (telemetry-like: a relaunch
+    /// re-uploading is fine and intended). Internal for test visibility.
+    var lastCatalogUploadAt: TimeInterval?
+    var lastCatalogFingerprint: Int?
+    var lastCatalogSuccessAt: TimeInterval?
+    /// Overridable by tests so the gating math can run on fake clocks instead
+    /// of waiting on real wall-clock seconds.
+    var catalogMinIntervalSeconds: TimeInterval = 60
+    var catalogFloorIntervalSeconds: TimeInterval = 600
     /// chat.db's current max message ROWID — watermark taken just before a
     /// send so the verifier can find the row that send created.
     var chatMaxRowID: (() -> Int64)?
@@ -168,6 +181,10 @@ final class CRMSyncService {
         // Last on purpose: logs describe the tick that just happened, and a
         // slow/failed upload must never delay the messaging work above.
         await uploadLogs()
+        // After logs, never blocking messaging: candidate catalog is
+        // telemetry for the console review tab, not part of the send/receive
+        // path.
+        await uploadCatalog()
     }
 
     /// Drain one batch of buffered crmLog lines to the nexus
@@ -401,6 +418,209 @@ final class CRMSyncService {
                 // POST per synced phone per poll, accepted.
                 pushedContactPhones.remove(phone)
             }
+        }
+    }
+
+    /// One 1:1 conversation's enriched metadata, ready for `catalogBody`.
+    /// Pure input struct: production builds it from ChatCatalogEntry +
+    /// contactInfoProvider, tests build it by hand.
+    struct CatalogChatInput {
+        let chatIdentifier: String
+        let displayName: String
+        let contactName: String?
+        let photoJPEG: Data?
+        let lastActivityAt: Date?
+        let messageCount: Int
+    }
+
+    /// A base64 JPEG this long or longer is dropped from the row rather than
+    /// sent — 100KB (binary) already exceeds anything a contact thumbnail
+    /// should encode to, and a partial/oversized blob helps the console less
+    /// than a row with no photo at all.
+    static let catalogMaxPhotoBase64Length = 100 * 1024
+
+    /// Chats per POST — kept well under typical body-size limits; larger
+    /// catalogs go out as multiple sequential POSTs (see `catalogBodies`).
+    static let catalogChunkSize = 500
+
+    /// Builds one POST body ({"agent_id", "chats": [...]}) for a chunk of
+    /// chats. Pure and static like `heartbeatBody`: production supplies real
+    /// chat.db + Contacts data, tests assert on the dict directly.
+    static func catalogBody(agentID: String, chats: [CatalogChatInput]) -> [String: Any] {
+        let iso = ISO8601DateFormatter()
+        let chatDicts: [[String: Any]] = chats.map { chat in
+            var dict: [String: Any] = [
+                "chat_identifier": chat.chatIdentifier,
+                "display_name": chat.displayName,
+                "message_count": chat.messageCount,
+            ]
+            if let contactName = chat.contactName, !contactName.isEmpty {
+                dict["contact_name"] = contactName
+            }
+            if let photoJPEG = chat.photoJPEG {
+                let base64 = photoJPEG.base64EncodedString()
+                if base64.utf8.count <= catalogMaxPhotoBase64Length {
+                    dict["photo_thumb"] = base64
+                }
+            }
+            if let lastActivityAt = chat.lastActivityAt {
+                dict["last_activity_at"] = iso.string(from: lastActivityAt)
+            }
+            return dict
+        }
+        return ["agent_id": agentID, "chats": chatDicts]
+    }
+
+    /// Splits `chats` into `catalogChunkSize`-sized POST bodies, in the same
+    /// order every time (the caller sorts/orders `chats` beforehand). Pure:
+    /// exercised directly by the chunking test without any network I/O.
+    static func catalogBodies(
+        agentID: String, chats: [CatalogChatInput], chunkSize: Int = catalogChunkSize
+    ) -> [[String: Any]] {
+        guard !chats.isEmpty else { return [] }
+        return stride(from: 0, to: chats.count, by: chunkSize).map { start in
+            let end = min(start + chunkSize, chats.count)
+            return catalogBody(agentID: agentID, chats: Array(chats[start..<end]))
+        }
+    }
+
+    /// A stable-within-process identity for "the same catalog contents":
+    /// combines sorted "chat_identifier|last_activity|message_count" triples
+    /// so unrelated field changes (contact name/photo) don't force a resend,
+    /// but a new/changed/removed chat or a new message does. Process-lifetime
+    /// only (Hasher's seed is randomized per launch) — fine, since the
+    /// fingerprint itself is in-memory-only state (see lastCatalogFingerprint).
+    static func catalogFingerprint(chats: [CatalogChatInput]) -> Int {
+        let iso = ISO8601DateFormatter()
+        let lines = chats.map { chat -> String in
+            let activity = chat.lastActivityAt.map { iso.string(from: $0) } ?? ""
+            return "\(chat.chatIdentifier)|\(activity)|\(chat.messageCount)"
+        }.sorted()
+        var hasher = Hasher()
+        for line in lines { hasher.combine(line) }
+        return hasher.finalize()
+    }
+
+    enum CatalogUploadDecision: Equatable {
+        /// Inside the 60s floor since the last attempt (success or not) —
+        /// don't touch the network at all this tick.
+        case tooSoon
+        /// Fingerprint unchanged and still within the 10-minute floor since
+        /// the last SUCCESSFUL upload — nothing new to report yet.
+        case skipUnchanged
+        /// Either the catalog changed, or it's been long enough that a lost
+        /// server-side row shouldn't go stale forever.
+        case upload
+    }
+
+    /// Pure gating decision — no network, no wall-clock sleep, so the skip
+    /// and floor-resend tests run instantly on fake clock values. Mirrors the
+    /// two rules from the S2 spec: at most once per `minIntervalSeconds`, and
+    /// (independently) a forced resend at least every `floorIntervalSeconds`
+    /// even when nothing changed.
+    static func catalogUploadDecision(
+        now: TimeInterval,
+        lastUploadAt: TimeInterval?,
+        minIntervalSeconds: TimeInterval,
+        fingerprint: Int,
+        lastFingerprint: Int?,
+        lastSuccessAt: TimeInterval?,
+        floorIntervalSeconds: TimeInterval
+    ) -> CatalogUploadDecision {
+        if let lastUploadAt, now - lastUploadAt < minIntervalSeconds {
+            return .tooSoon
+        }
+        if fingerprint == lastFingerprint {
+            let sinceSuccess = lastSuccessAt.map { now - $0 } ?? .infinity
+            if sinceSuccess < floorIntervalSeconds {
+                return .skipUnchanged
+            }
+        }
+        return .upload
+    }
+
+    /// Uploads the candidate catalog (POST {apiEndpoint}/catalog, chunked at
+    /// `catalogChunkSize`) so the console review tab can list every 1:1
+    /// conversation — metadata only, never message bodies. Gated to at most
+    /// once per `catalogMinIntervalSeconds`, and skipped when the fingerprint
+    /// is unchanged within `catalogFloorIntervalSeconds` of the last success.
+    /// Fire-and-forget like the heartbeat/log uploads: never blocks
+    /// messaging, and a legacy backend (404) degrades silently — same
+    /// handling as pullGate, see `catalogUploadDecision`'s 404 case below.
+    func uploadCatalog() async {
+        guard let provider = catalogChatsProvider else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+
+        guard let rawChats = try? provider() else { return }
+        let chats: [CatalogChatInput] = rawChats.map { entry in
+            let contact = contactInfoProvider?(entry.chatIdentifier)
+            return CatalogChatInput(
+                chatIdentifier: entry.chatIdentifier,
+                displayName: entry.displayName ?? entry.chatIdentifier,
+                contactName: contact?.name,
+                photoJPEG: contact?.photoJPEG,
+                lastActivityAt: entry.lastActivityAt,
+                messageCount: entry.messageCount
+            )
+        }
+        let fingerprint = Self.catalogFingerprint(chats: chats)
+
+        let decision = Self.catalogUploadDecision(
+            now: now,
+            lastUploadAt: lastCatalogUploadAt,
+            minIntervalSeconds: catalogMinIntervalSeconds,
+            fingerprint: fingerprint,
+            lastFingerprint: lastCatalogFingerprint,
+            lastSuccessAt: lastCatalogSuccessAt,
+            floorIntervalSeconds: catalogFloorIntervalSeconds
+        )
+        guard decision == .upload else { return }
+        // Set BEFORE the network call: the 60s floor limits attempt
+        // frequency regardless of outcome, so a persistently failing
+        // endpoint can't be hammered every poll tick.
+        lastCatalogUploadAt = now
+
+        guard let url = URL(string: "\(config.apiEndpoint)/catalog") else { return }
+        let bodies = Self.catalogBodies(agentID: config.agentID, chats: chats)
+        guard !bodies.isEmpty else {
+            // Nothing to report (no 1:1 chats yet) is still a real, uploadable
+            // state — but with no chats there's nothing to POST or persist
+            // against; leave fingerprint/successAt untouched so a chat that
+            // appears later is picked up on the very next tick.
+            return
+        }
+
+        var succeeded = true
+        for body in bodies {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            do {
+                let (_, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else { succeeded = false; continue }
+                switch http.statusCode {
+                case 200:
+                    continue
+                case 404:
+                    // Legacy backend: no catalog wire. Silent degrade, same
+                    // as pullGate's 404 handling — no log, no state update
+                    // (fingerprint/successAt stay nil/stale), so the 60s
+                    // floor alone brings us back to try again next tick,
+                    // forever, without ever spamming the log.
+                    return
+                default:
+                    crmLog("[CRM] uploadCatalog: HTTP \(http.statusCode)")
+                    succeeded = false
+                }
+            } catch {
+                succeeded = false
+            }
+        }
+        if succeeded {
+            lastCatalogFingerprint = fingerprint
+            lastCatalogSuccessAt = now
         }
     }
 

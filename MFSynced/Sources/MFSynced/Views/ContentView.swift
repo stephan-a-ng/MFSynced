@@ -41,6 +41,10 @@ final class AppState {
         crmService?.contactInfoProvider = { [weak self] phone in
             self?.contactStore.contactInfo(for: phone) ?? (nil, nil)
         }
+        // Candidate catalog upload: every 1:1 conversation, metadata only.
+        crmService?.catalogChatsProvider = { [weak self] in
+            try self?.chatDB.fetchCatalog() ?? []
+        }
         crmService?.chatMaxRowID = { [weak self] in
             (try? self?.chatDB.getMaxRowID()) ?? 0
         }
