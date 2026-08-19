@@ -610,7 +610,16 @@ final class CRMSyncStagedTests: XCTestCase {
     // same pattern as CRMSyncCatalogTests: no live server, just proving the
     // provider + DI (dependency injection) hooks are wired correctly end to end).
 
-    private func makeService(synced: Set<String> = [], syncQueue: SyncQueueDatabase = SyncQueueDatabase()) -> CRMSyncService {
+    private func makeService(
+        synced: Set<String> = [],
+        // NEVER default to SyncQueueDatabase() here: the no-path init opens
+        // the user's REAL Application Support database, and a test run then
+        // writes schema/rows into live data (this happened — an old-schema
+        // staged_cursors table landed in the real sync_queue.db).
+        syncQueue: SyncQueueDatabase = SyncQueueDatabase(
+            path: NSTemporaryDirectory() + "test_svc_\(UUID().uuidString).db"
+        )
+    ) -> CRMSyncService {
         var config = CRMConfig()
         config.isEnabled = true
         // Fast-fail endpoint: connection refused immediately, no network wait.
