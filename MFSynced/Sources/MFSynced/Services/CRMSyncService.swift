@@ -684,9 +684,14 @@ final class CRMSyncService {
         guard let rawChats = try? provider() else { return }
         let chats: [CatalogChatInput] = rawChats.map { entry in
             let contact = contactInfoProvider?(entry.chatIdentifier)
+            // chat.db stores EMPTY STRING (not NULL) for nearly every 1:1
+            // chat's display_name — `??` alone never fires, and the nexus
+            // requires a non-empty display_name, so "" would 422 the whole
+            // catalog chunk. Empty means absent here.
+            let rawName = entry.displayName ?? ""
             return CatalogChatInput(
                 chatIdentifier: entry.chatIdentifier,
-                displayName: entry.displayName ?? entry.chatIdentifier,
+                displayName: rawName.isEmpty ? entry.chatIdentifier : rawName,
                 contactName: contact?.name,
                 photoJPEG: contact?.photoJPEG,
                 lastActivityAt: entry.lastActivityAt,
