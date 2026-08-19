@@ -212,6 +212,49 @@ final class ChatDatabase {
         return conversations
     }
 
+    /// Metadata-only catalog of every 1:1 conversation for the nexus
+    /// candidate-review tab — NEVER message bodies. Group chats
+    /// (chat.style == 43, the same value Conversation.isGroup / Message.isGroup
+    /// already treat as "group" elsewhere in this file) are excluded; every
+    /// other style value is treated as 1:1 (observed as 45 on this schema)
+    /// rather than hard-coding a second magic number the rest of the
+    /// codebase doesn't rely on.
+    func fetchCatalog() throws -> [ChatCatalogEntry] {
+        let db = try openConnection()
+        defer { sqlite3_close(db) }
+
+        let sql = """
+            SELECT c.chat_identifier, c.display_name,
+                MAX(m.date) AS last_message_date,
+                COUNT(m.ROWID) AS message_count
+            FROM chat c
+            LEFT JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
+            LEFT JOIN message m ON cmj.message_id = m.ROWID
+            WHERE c.style != 43
+            GROUP BY c.chat_identifier
+            HAVING last_message_date IS NOT NULL
+            ORDER BY last_message_date DESC
+            """
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw ChatDBError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        var entries: [ChatCatalogEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let identifier = columnText(stmt, 0) else { continue }
+            entries.append(ChatCatalogEntry(
+                chatIdentifier: identifier,
+                displayName: columnText(stmt, 1),
+                lastActivityAt: AppleDateConverter.toDate(sqlite3_column_int64(stmt, 2)),
+                messageCount: Int(sqlite3_column_int(stmt, 3))
+            ))
+        }
+        return entries
+    }
+
     func searchMessages(query: String, limit: Int = 50) throws -> [Message] {
         let db = try openConnection()
         defer { sqlite3_close(db) }
