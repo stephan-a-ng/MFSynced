@@ -80,6 +80,15 @@ final class CRMSyncService {
     var chatServiceHint: ((String) -> String?)?
     /// CNContactStore name + JPEG for a phone; injected like chatServiceHint.
     var contactInfoProvider: ((String) -> (name: String?, photoJPEG: Data?))?
+    /// Test seam for `pushContactInfo()`'s `/contacts` POST: when set, the
+    /// request is routed through this closure instead of a real `URLSession`
+    /// call, returning the HTTP status code to react to (nil simulates a
+    /// network failure / no response). Same closure-override DI convention
+    /// as `chatServiceHint`/`contactInfoProvider` — nil in production, so the
+    /// real network path always runs there; tests set it to exercise the
+    /// 200/404/5xx branches without a live endpoint. Internal (not private)
+    /// for test visibility.
+    var contactPushStatusOverride: ((URLRequest) -> Int?)?
     /// Enumerates every 1:1 conversation (metadata only) for the candidate
     /// catalog upload; injected (ChatDatabase.fetchCatalog()-backed in
     /// production) so the sync service stays testable without a live chat.db.
@@ -468,6 +477,20 @@ final class CRMSyncService {
     /// Push CNContactStore name+photo for synced phones the backend hasn't
     /// been given yet this app session. Once per phone per launch: uploads
     /// are ephemeral on the backend, so each launch re-heals the avatars.
+    ///
+    /// Wire reality: the legacy CRM backend implements POST
+    /// {apiEndpoint}/contacts and still needs this push during the
+    /// transition. The nexus does NOT implement it —
+    /// contact_name + photo_thumb already ride along on every chat in the
+    /// S2 candidate-catalog upload (`uploadCatalog`, POST /catalog), and the
+    /// server copies the photo onto the org-side Person at SHARE time, so a
+    /// per-phone push is redundant on that wire. A 404 here means "this
+    /// backend doesn't have the route" — same convention as
+    /// `pullGate`/`uploadLogs`/`uploadCatalog` — so the phone is marked
+    /// pushed (permanent-for-this-launch skip) instead of retried every poll
+    /// tick forever. Any other failure (5xx/network) is presumed transient
+    /// on a backend that DOES implement the route, so it still retries, same
+    /// as before.
     func pushContactInfo() async {
         guard let provider = contactInfoProvider else { return }
         for phone in config.syncedPhoneNumbers where !pushedContactPhones.contains(phone) {
@@ -492,16 +515,34 @@ final class CRMSyncService {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = body
 
-            if let (_, response) = try? await session.data(for: request),
-               let http = response as? HTTPURLResponse, http.statusCode == 200 {
+            switch await contactPushStatusCode(for: request) {
+            case 200:
                 crmLog("[CRM] pushContactInfo: sent \(phone) photo=\(photoJPEG != nil)")
-            } else {
+            case 404:
+                // No /contacts route on this backend (the nexus — catalog +
+                // share-time copy already covers it). Stay marked pushed:
+                // retrying a route that will never appear is pure noise.
+                crmLog("[CRM] pushContactInfo: \(phone) — no /contacts route, not retrying this launch")
+            default:
                 // Retry on a later poll. Deliberate for transient failures
-                // (offline); a permanently-failing backend costs one small
-                // POST per synced phone per poll, accepted.
+                // (offline, or a real legacy-backend outage); a
+                // permanently-failing backend costs one small POST per
+                // synced phone per poll, accepted.
                 pushedContactPhones.remove(phone)
             }
         }
+    }
+
+    /// Performs the `/contacts` POST and returns its HTTP status code (nil
+    /// for a network failure or non-HTTP response). Routes through
+    /// `contactPushStatusOverride` when a test has set one; otherwise runs
+    /// the real `URLSession` call.
+    private func contactPushStatusCode(for request: URLRequest) async -> Int? {
+        if let override = contactPushStatusOverride {
+            return override(request)
+        }
+        guard let (_, response) = try? await session.data(for: request) else { return nil }
+        return (response as? HTTPURLResponse)?.statusCode
     }
 
     /// One 1:1 conversation's enriched metadata, ready for `catalogBody`.
