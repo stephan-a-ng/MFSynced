@@ -22,6 +22,9 @@ cp "$BUILD_DIR/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
 # Copy Info.plist
 cp "$SCRIPT_DIR/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 
+# Copy app icon (Info.plist declares CFBundleIconFile=AppIcon)
+cp "$SCRIPT_DIR/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+
 SIGN_IDENTITY="MFSynced Dev"
 
 # Check if persistent signing identity exists; fall back to ad-hoc

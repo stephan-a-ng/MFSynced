@@ -39,7 +39,7 @@ if [[ -f "$SCRIPT_DIR/.notary.env" ]]; then
 fi
 
 IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
-  | awk -F '"' '/Developer ID Application/ {print $2; exit}')"
+  | awk -F '"' '/Developer ID Application/ {print $2; exit}' || true)"
 if [[ -z "$IDENTITY" ]]; then
   echo "ERROR: no 'Developer ID Application' identity in the keychain." >&2
   echo "Create one: Xcode → Settings → Accounts → Manage Certificates → +" >&2
@@ -99,6 +99,7 @@ fi
 # --- notarize + staple ---------------------------------------------------------
 echo "==> Submitting to Apple notary service (this can take a few minutes)..."
 NOTARIZE_ZIP="$DIST_DIR/.notarize-upload.zip"
+rm -f "$NOTARIZE_ZIP"
 ditto -c -k --keepParent "$APP_BUNDLE" "$NOTARIZE_ZIP"
 xcrun notarytool submit "$NOTARIZE_ZIP" \
   --key "$ASC_KEY_FILEPATH" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID" \
