@@ -99,4 +99,28 @@ final class SyncQueueDatabaseTests: XCTestCase {
         XCTAssertEqual(all["+1666"]?.lastRowID, 9)
         XCTAssertEqual(all["+1666"]?.backfillDone, false)
     }
+
+    // MARK: - kv_state (S5 — contact-updates poll cursor)
+
+    func testGetStateMissingByDefault() throws {
+        XCTAssertNil(try db.getState(key: "contact_updates_cursor"))
+    }
+
+    func testSetStateAndGetStateRoundTrip() throws {
+        try db.setState(key: "contact_updates_cursor", value: "42")
+        XCTAssertEqual(try db.getState(key: "contact_updates_cursor"), "42")
+    }
+
+    func testSetStateUpsertOverwritesPreviousValue() throws {
+        try db.setState(key: "contact_updates_cursor", value: "1")
+        try db.setState(key: "contact_updates_cursor", value: "99")
+        XCTAssertEqual(try db.getState(key: "contact_updates_cursor"), "99")
+    }
+
+    func testSetStateKeysAreIndependent() throws {
+        try db.setState(key: "contact_updates_cursor", value: "5")
+        try db.setState(key: "some_other_key", value: "unrelated")
+        XCTAssertEqual(try db.getState(key: "contact_updates_cursor"), "5")
+        XCTAssertEqual(try db.getState(key: "some_other_key"), "unrelated")
+    }
 }
