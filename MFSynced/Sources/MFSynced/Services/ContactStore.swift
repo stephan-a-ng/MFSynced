@@ -38,17 +38,51 @@ final class ContactStore {
         return contact
     }
 
-    /// Name + a small JPEG of the contact's photo for backend sync, or nils
-    /// when the contact/photo is unknown. The thumbnail CNContactStore hands
-    /// back is already small; re-encode caps it for the upload path.
+    /// Edge of the square avatar we ship. The console renders avatars at
+    /// ~40px (80px on retina), so 128px is already generous. Contacts
+    /// "thumbnails" on modern macOS are frequently 320px+ and ~80 KB — over
+    /// the catalog's 100 KiB base64 cap once encoded — so without this
+    /// downscale a real contact photo was silently dropped (observed live:
+    /// an 81 KB thumbnail never reached the console).
+    static let avatarEdge: CGFloat = 128
+
+    /// Name + a SMALL JPEG of the contact's photo for backend sync, or nils
+    /// when the contact/photo is unknown. Always downscaled to `avatarEdge`
+    /// (aspect-fill, centered) before encoding so every thumbnail lands in
+    /// the single-digit-KB range regardless of what Contacts hands back.
     func contactInfo(for identifier: String) -> (name: String?, photoJPEG: Data?) {
         let resolved = contact(for: identifier)
         guard let photo = resolved.photo else { return (resolved.fullName, nil) }
-        guard let tiff = photo.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let jpeg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.8])
-        else { return (resolved.fullName, nil) }
+        guard let jpeg = Self.avatarJPEG(from: photo) else { return (resolved.fullName, nil) }
         return (resolved.fullName, jpeg)
+    }
+
+    /// Aspect-fill `image` into an `avatarEdge` square and encode as JPEG.
+    /// Pure (no Contacts access) so the size guarantee is unit-testable.
+    static func avatarJPEG(from image: NSImage, edge: CGFloat = avatarEdge,
+                           quality: CGFloat = 0.8) -> Data? {
+        let size = NSSize(width: edge, height: edge)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(edge), pixelsHigh: Int(edge),
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else { return nil }
+        rep.size = size
+        NSGraphicsContext.saveGraphicsState()
+        defer { NSGraphicsContext.restoreGraphicsState() }
+        guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+        NSGraphicsContext.current = ctx
+        ctx.imageInterpolation = .high
+        // Aspect-fill: scale so the shorter side matches `edge`, center-crop.
+        let src = image.size
+        guard src.width > 0, src.height > 0 else { return nil }
+        let scale = max(edge / src.width, edge / src.height)
+        let drawW = src.width * scale, drawH = src.height * scale
+        let origin = NSPoint(x: (edge - drawW) / 2, y: (edge - drawH) / 2)
+        image.draw(in: NSRect(origin: origin, size: NSSize(width: drawW, height: drawH)),
+                   from: .zero, operation: .copy, fraction: 1)
+        ctx.flushGraphics()
+        return rep.representation(using: .jpeg, properties: [.compressionFactor: quality])
     }
 
     func requestAccess() async -> Bool {
