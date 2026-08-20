@@ -593,6 +593,13 @@ actor AuthService {
                     failures.append("\(portValue)/\(mode): init threw")
                     continue
                 }
+                // An NWListener started with NO newConnectionHandler fails
+                // with EINVAL (verified empirically 2026-08-20; this — not
+                // the bind construction — was why every sign-in died with
+                // noBindablePort while ControlServer, which sets its handler
+                // before start, bound fine). Park a stray-cancelling handler
+                // here; awaitCallback installs the real one once we return.
+                listener.newConnectionHandler = { connection in connection.cancel() }
                 let latch = OneShotLatch()
                 let failure = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
                     listener.stateUpdateHandler = { state in
