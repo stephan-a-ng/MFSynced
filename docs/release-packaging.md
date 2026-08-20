@@ -1,7 +1,7 @@
-# Releasing the Mac app (MFSynced.app)
+# Releasing the Mac app (Phone Sync.app)
 
 `MFSynced/build-release.sh` produces a Developer-ID-signed, notarized,
-stapled `MFSynced.app` plus a distributable zip in `MFSynced/dist/`.
+stapled `Phone Sync.app` plus a distributable zip in `MFSynced/dist/`.
 The result runs on any Mac (macOS 14+, Apple Silicon or Intel) with no
 Gatekeeper warnings — no Xcode or source checkout needed on the target.
 
@@ -32,9 +32,9 @@ VERSION=1.1 ./build-release.sh      # stamp a version
 
 ## Installing on a target Mac
 
-1. Unzip `MFSynced-<version>.zip`, drag `MFSynced.app` to `/Applications`.
+1. Unzip `PhoneSync-<version>.zip`, drag `Phone Sync.app` to `/Applications`.
 2. **Full Disk Access**: System Settings → Privacy & Security → Full Disk
-   Access → add MFSynced. Required — the app reads the Messages database
+   Access → add Phone Sync. Required — the app reads the Messages database
    (`~/Library/Messages/chat.db`). No packaging can bypass this; it is a
    per-machine grant.
 3. **Contacts** and **Automation → Messages**: approve the prompts on first

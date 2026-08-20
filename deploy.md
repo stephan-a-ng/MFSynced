@@ -13,12 +13,12 @@ This compiles the app, assembles the `.app` bundle, and ad-hoc code-signs it.
 
 **Install and launch:**
 ```bash
-cp -r MFSynced.app /Applications/
-open /Applications/MFSynced.app
+cp -r "Phone Sync.app" /Applications/
+open "/Applications/Phone Sync.app"
 ```
 
 **After every rebuild:** The ad-hoc re-signing revokes Full Disk Access.
-Go to **System Settings → Privacy & Security → Full Disk Access** and re-enable MFSynced.
+Go to **System Settings → Privacy & Security → Full Disk Access** and re-enable Phone Sync.
 
 ---
 

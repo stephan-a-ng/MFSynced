@@ -3,7 +3,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/.build/arm64-apple-macosx/debug"
-APP_BUNDLE="$SCRIPT_DIR/MFSynced.app"
+APP_BUNDLE="$SCRIPT_DIR/Phone Sync.app"
 BINARY_NAME="MFSynced"
 BUNDLE_ID="tech.moonfive.MFSynced"
 
@@ -17,7 +17,7 @@ mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
 # Copy binary
-cp "$BUILD_DIR/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
+cp "$BUILD_DIR/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/PhoneSync"
 
 # Copy Info.plist
 cp "$SCRIPT_DIR/Info.plist" "$APP_BUNDLE/Contents/Info.plist"

@@ -1,7 +1,7 @@
 #!/bin/bash
-# build-release.sh — signed, notarized, distributable MFSynced.app
+# build-release.sh — signed, notarized, distributable Phone Sync.app
 #
-# Output: dist/MFSynced-<version>.zip — runs on any Apple Silicon or Intel Mac
+# Output: dist/PhoneSync-<version>.zip — runs on any Apple Silicon or Intel Mac
 # (macOS 14+) with no Gatekeeper warnings.
 #
 # Requirements:
@@ -26,8 +26,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DIST_DIR="$SCRIPT_DIR/dist"
-APP_BUNDLE="$DIST_DIR/MFSynced.app"
-BINARY_NAME="MFSynced"
+APP_BUNDLE="$DIST_DIR/Phone Sync.app"
+BINARY_NAME="MFSynced"     # SwiftPM target/binary name (internal)
+EXEC_NAME="PhoneSync"      # CFBundleExecutable in Info.plist
+# Bundle ID deliberately unchanged across the Phone Sync rename: it is the
+# app's machine identity — TCC grants and UserDefaults are keyed to it.
 BUNDLE_ID="tech.moonfive.MFSynced"
 SKIP_NOTARIZE=0
 [[ "${1:-}" == "--skip-notarize" ]] && SKIP_NOTARIZE=1
@@ -68,7 +71,7 @@ BIN_PATH="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
 echo "==> Assembling .app bundle..."
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-cp "$BIN_PATH/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$BINARY_NAME"
+cp "$BIN_PATH/$BINARY_NAME" "$APP_BUNDLE/Contents/MacOS/$EXEC_NAME"
 cp "$SCRIPT_DIR/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 cp "$SCRIPT_DIR/Resources/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 if [[ -n "${VERSION:-}" ]]; then
@@ -87,7 +90,7 @@ codesign --force --timestamp --options runtime \
   "$APP_BUNDLE"
 codesign --verify --strict --verbose=2 "$APP_BUNDLE"
 
-ZIP_PATH="$DIST_DIR/MFSynced-$APP_VERSION.zip"
+ZIP_PATH="$DIST_DIR/PhoneSync-$APP_VERSION.zip"
 rm -f "$ZIP_PATH"
 
 if [[ $SKIP_NOTARIZE -eq 1 ]]; then
@@ -118,5 +121,5 @@ spctl --assess --type execute --verbose=2 "$APP_BUNDLE"
 
 echo ""
 echo "✓ Distributable: $ZIP_PATH"
-echo "  Install on any Mac: unzip, drag MFSynced.app to /Applications,"
+echo "  Install on any Mac: unzip, drag Phone Sync.app to /Applications,"
 echo "  then grant Full Disk Access in System Settings → Privacy & Security."
