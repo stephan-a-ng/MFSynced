@@ -245,14 +245,26 @@ private final class CallbackCompletion: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<String, Error>?
     private var finished = false
+    // A code that arrived BEFORE any continuation attached. The handler is
+    // armed before the browser opens (so no callback can be missed), which
+    // means an instantly-redirecting IdP session can legitimately deliver
+    // the code before signIn() gets around to awaiting it — buffer it
+    // rather than dropping it.
+    private var bufferedCode: String?
 
     /// Stores the continuation this instance will resume exactly once. If
-    /// `cancel()` already fired before this is called (the
-    /// already-cancelled-at-entry edge case), resumes immediately with a
+    /// the code already arrived (instant-redirect race), resumes with it
+    /// right away; if `cancel()` already fired, resumes immediately with a
     /// `CancellationError` instead of waiting on a socket event a cancelled
     /// sign-in no longer cares about.
     func attach(_ continuation: CheckedContinuation<String, Error>) {
         lock.lock()
+        if let code = bufferedCode {
+            bufferedCode = nil
+            lock.unlock()
+            continuation.resume(returning: code)
+            return
+        }
         if finished {
             lock.unlock()
             continuation.resume(throwing: CancellationError())
@@ -264,12 +276,17 @@ private final class CallbackCompletion: @unchecked Sendable {
 
     /// A connection's request line parsed successfully — resumes with its
     /// code, unless another connection (or a cancellation) already won.
+    /// With no continuation attached yet, the code is buffered for the
+    /// upcoming `attach`.
     func succeed(with code: String) {
         lock.lock()
         guard !finished else { lock.unlock(); return }
         finished = true
         let pending = continuation
         continuation = nil
+        if pending == nil {
+            bufferedCode = code
+        }
         lock.unlock()
         pending?.resume(returning: code)
     }
@@ -288,12 +305,30 @@ private final class CallbackCompletion: @unchecked Sendable {
 // MARK: - AuthService
 
 actor AuthService {
-    enum AuthError: Error {
+    enum AuthError: Error, LocalizedError {
         case signedOut
-        case noBindablePort
+        case noBindablePort(detail: String)
         case invalidCallback
         case tokenExchangeFailed
         case signInTimedOut
+
+        // Spell every failure out for the settings UI — "(AuthError
+        // error 1.)" cost a debugging round-trip that one real sentence
+        // would have avoided.
+        var errorDescription: String? {
+            switch self {
+            case .signedOut:
+                return "Not signed in."
+            case .noBindablePort(let detail):
+                return "Could not open a local sign-in listener — \(detail)"
+            case .invalidCallback:
+                return "The browser sign-in did not complete (bad callback)."
+            case .tokenExchangeFailed:
+                return "Moon Five rejected the sign-in code exchange."
+            case .signInTimedOut:
+                return "Sign-in timed out — the browser window was not completed."
+            }
+        }
     }
 
     private let config: OIDCConfiguration
@@ -483,10 +518,17 @@ actor AuthService {
         )
         let authorizeURL = AuthURLBuilder.authorizeURL(config: scopedConfig, state: state, codeChallenge: challenge)
 
+        // Arm the real callback handler SYNCHRONOUSLY before the browser is
+        // ever opened — an instantly-redirecting IdP session must find the
+        // real handler, not a placeholder (codex P2; Task.yield gives no
+        // ordering guarantee, so this is a plain synchronous call). A code
+        // that lands before the await below is buffered by the completion.
+        let completion = Self.armCallbackHandler(on: listener, expectedState: state)
+
         let opened = await MainActor.run { NSWorkspace.shared.open(authorizeURL) }
         guard opened else { throw AuthError.invalidCallback }
 
-        let code = try await Self.awaitCallbackWithTimeout(on: listener, expectedState: state)
+        let code = try await Self.awaitCallbackWithTimeout(completion, listener: listener)
 
         let redirectURI = "http://127.0.0.1:\(port)/callback"
         let tokenSet = try await exchangeCode(code: code, codeVerifier: verifier, redirectURI: redirectURI)
@@ -546,39 +588,76 @@ actor AuthService {
     // MARK: Loopback listener (integration — untested)
 
     private static func startLoopbackListener(candidatePorts: [Int]) async throws -> (NWListener, Int) {
+        var failures: [String] = []
         for portValue in candidatePorts {
             guard let port = NWEndpoint.Port(rawValue: UInt16(portValue)) else { continue }
 
-            let parameters = NWParameters.tcp
-            // Bind explicitly to the IPv4 loopback address — never a
-            // wildcard bind, so this callback listener is never reachable
-            // from outside this Mac even for the few seconds it's up
-            // during a sign-in.
-            parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
-            guard let listener = try? NWListener(using: parameters, on: port) else { continue }
+            // Two constructions, best-first. (a) A loopback-pinned bind —
+            // the socket is never reachable from off-box at all (same
+            // construction ControlServer uses for 127.0.0.1:7891). (b) A
+            // plain wildcard bind as fallback: the vanilla NWListener path,
+            // kept safe by the accept-side loopback peer check plus the
+            // 64-char random `state` the callback must echo. NWListener
+            // rejects (a) with EINVAL on some macOS builds/contexts, which
+            // previously killed every sign-in as `noBindablePort`.
+            var attempts: [(String, () -> NWListener?)] = []
+            attempts.append(("loopback-endpoint", {
+                let parameters = NWParameters.tcp
+                parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
+                // NWListener(using:on:) THROWS whenever requiredLocalEndpoint
+                // is set — the port must come from the endpoint alone.
+                return try? NWListener(using: parameters)
+            }))
+            attempts.append(("wildcard", {
+                try? NWListener(using: .tcp, on: port)
+            }))
 
-            let latch = OneShotLatch()
-            let ready = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                listener.stateUpdateHandler = { state in
-                    switch state {
-                    case .ready:
-                        guard latch.tryFire() else { return }
-                        continuation.resume(returning: true)
-                    case .failed, .cancelled:
-                        guard latch.tryFire() else { return }
-                        continuation.resume(returning: false)
-                    default:
-                        break
-                    }
+            for (mode, make) in attempts {
+                guard let listener = make() else {
+                    failures.append("\(portValue)/\(mode): init threw")
+                    continue
                 }
-                listener.start(queue: .main)
-            }
-            if ready {
+                // An NWListener started with NO newConnectionHandler fails
+                // with EINVAL (verified empirically 2026-08-20; this — not
+                // the bind construction — was why every sign-in died with
+                // noBindablePort while ControlServer, which sets its handler
+                // before start, bound fine). Park a stray-cancelling handler
+                // here; awaitCallback installs the real one once we return.
+                listener.newConnectionHandler = { connection in connection.cancel() }
+                let latch = OneShotLatch()
+                let failure = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+                    listener.stateUpdateHandler = { state in
+                        switch state {
+                        case .ready:
+                            guard latch.tryFire() else { return }
+                            continuation.resume(returning: nil)
+                        case .failed(let error):
+                            guard latch.tryFire() else { return }
+                            continuation.resume(returning: "failed: \(error)")
+                        case .waiting(let error):
+                            // A listener stuck in .waiting never becomes
+                            // ready on its own here — treat as a failure so
+                            // the loop moves on instead of hanging sign-in.
+                            guard latch.tryFire() else { return }
+                            continuation.resume(returning: "waiting: \(error)")
+                        case .cancelled:
+                            guard latch.tryFire() else { return }
+                            continuation.resume(returning: "cancelled")
+                        default:
+                            break
+                        }
+                    }
+                    listener.start(queue: .main)
+                }
+                if let failure {
+                    failures.append("\(portValue)/\(mode): \(failure)")
+                    listener.cancel()
+                    continue
+                }
                 return (listener, portValue)
             }
-            listener.cancel()
         }
-        throw AuthError.noBindablePort
+        throw AuthError.noBindablePort(detail: failures.joined(separator: "; "))
     }
 
     /// Races the real loopback callback against `signInTimeoutNanoseconds`
@@ -587,11 +666,11 @@ actor AuthService {
     /// `withTaskCancellationHandler` (triggered when this task group
     /// cancels its sibling) tears down the socket side cleanly.
     private static func awaitCallbackWithTimeout(
-        on listener: NWListener, expectedState: String
+        _ completion: CallbackCompletion, listener: NWListener
     ) async throws -> String {
         try await withThrowingTaskGroup(of: String.self) { group in
             group.addTask {
-                try await awaitCallback(on: listener, expectedState: expectedState)
+                try await awaitArmedCallback(completion, listener: listener)
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: signInTimeoutNanoseconds)
@@ -616,12 +695,38 @@ actor AuthService {
     /// `CancellationError` through the SAME `CallbackCompletion`, so a
     /// late-arriving real connection can never double-resume after a
     /// cancellation already won.
-    private static func awaitCallback(on listener: NWListener, expectedState: String) async throws -> String {
+    /// Installs the REAL callback connection handler — synchronously, so
+    /// the caller can prove the handler is armed before the browser is ever
+    /// opened (an instantly-redirecting IdP session must not race a
+    /// placeholder handler; codex P2). The returned completion buffers a
+    /// code that lands before anyone awaits it.
+    private static func armCallbackHandler(
+        on listener: NWListener, expectedState: String
+    ) -> CallbackCompletion {
         let completion = CallbackCompletion()
-        return try await withTaskCancellationHandler(operation: {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-                completion.attach(continuation)
-                listener.newConnectionHandler = { connection in
+        listener.newConnectionHandler = { connection in
+                    // Only the local browser may deliver the callback. The
+                    // wildcard-bind fallback makes this check load-bearing;
+                    // under the loopback-pinned bind it is redundant depth.
+                    // Fail CLOSED: anything that isn't an explicitly
+                    // recognized loopback hostPort (e.g. .opaque endpoints)
+                    // is rejected, not waved through (codex P2).
+                    guard case let .hostPort(host, _) = connection.endpoint else {
+                        connection.cancel()
+                        return
+                    }
+                    let peer = "\(host)"
+                    guard peer.hasPrefix("127.") || peer == "::1" || peer.hasPrefix("::1%") else {
+                        connection.cancel()
+                        return
+                    }
+                    // An accepted connection that never sends anything must
+                    // not outlive the sign-in: give it a hard deadline
+                    // (idempotent — cancel on a finished connection is a
+                    // no-op). Codex P3.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+                        connection.cancel()
+                    }
                     connection.stateUpdateHandler = { state in
                         guard case .ready = state else { return }
                         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, error in
@@ -636,8 +741,11 @@ actor AuthService {
                                 connection.cancel()
                                 return
                             }
-                            let html = "<html><body>You're signed in — close this window.</body></html>"
-                            let responseText = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+                            // charset is load-bearing: without it browsers
+                            // decode this UTF-8 body as Latin-1 and the em
+                            // dash renders as mojibake ("â€”").
+                            let html = "<html><meta charset=\"utf-8\"><body>You're signed in — close this window.</body></html>"
+                            let responseText = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
                                 + "Content-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
                             connection.send(
                                 content: responseText.data(using: .utf8),
@@ -647,7 +755,21 @@ actor AuthService {
                         }
                     }
                     connection.start(queue: .main)
-                }
+        }
+        return completion
+    }
+
+    /// Awaits a code from an ALREADY-ARMED handler (`armCallbackHandler`).
+    /// Cancellation (from the timeout race or the enclosing Task) tears the
+    /// listener down and resumes with a `CancellationError` through the
+    /// SAME `CallbackCompletion`, so a late-arriving real connection can
+    /// never double-resume after a cancellation already won.
+    private static func awaitArmedCallback(
+        _ completion: CallbackCompletion, listener: NWListener
+    ) async throws -> String {
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+                completion.attach(continuation)
             }
         }, onCancel: {
             listener.cancel()
