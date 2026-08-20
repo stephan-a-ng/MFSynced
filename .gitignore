@@ -2,3 +2,9 @@ __pycache__/
 *.pyc
 *.egg-info/
 web/backend/uploads/
+
+# macOS app build artifacts — built by MFSynced/build-app.sh / build-release.sh
+MFSynced/MFSynced.app/
+MFSynced/dist/
+MFSynced/.build/
+MFSynced/.notary.env
