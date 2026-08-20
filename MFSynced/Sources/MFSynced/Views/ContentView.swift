@@ -174,7 +174,7 @@ final class AppState {
             print("Failed to load conversations: \(error)")
             let msg = error.localizedDescription
             if msg.contains("authorization denied") || msg.contains("not authorized") {
-                dbError = "Full Disk Access required.\n\nGo to System Settings → Privacy & Security → Full Disk Access and add MFSynced."
+                dbError = "Full Disk Access required.\n\nGo to System Settings → Privacy & Security → Full Disk Access and add Phone Sync."
             } else {
                 dbError = "Could not read iMessage database: \(msg)"
             }

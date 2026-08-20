@@ -9,7 +9,7 @@ struct MFSyncedApp: App {
         WindowGroup {
             ContentView()
                 // Blank the window title: SwiftUI otherwise paints the app
-                // name ("MFSynced") into the detail toolbar, wasting space.
+                // name ("Phone Sync") into the detail toolbar, wasting space.
                 .navigationTitle("")
         }
         .windowStyle(.titleBar)

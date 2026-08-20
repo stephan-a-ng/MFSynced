@@ -25,7 +25,7 @@ struct SetupView: View {
                 Image(systemName: "message.fill")
                     .font(.title2)
                     .foregroundStyle(.blue)
-                Text("MFSynced Setup")
+                Text("Phone Sync Setup")
                     .font(.title2.bold())
             }
             .padding(.top, 32)
@@ -108,7 +108,7 @@ struct SetupView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Full Disk Access is required")
                             .font(.headline)
-                        Text("MFSynced reads your iMessage history from ~/Library/Messages/chat.db. macOS blocks access until you grant Full Disk Access.")
+                        Text("Phone Sync reads your iMessage history from ~/Library/Messages/chat.db. macOS blocks access until you grant Full Disk Access.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -117,7 +117,7 @@ struct SetupView: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     instructionRow("1", "Open System Settings → Privacy & Security → Full Disk Access")
-                    instructionRow("2", "Click + and add MFSynced (this binary), OR enable Terminal if you launched the app from a terminal")
+                    instructionRow("2", "Click + and add Phone Sync (this binary), OR enable Terminal if you launched the app from a terminal")
                     instructionRow("3", "Toggle it ON and authenticate with your password")
                     instructionRow("4", "Click 'Check Again' below — no need to quit or relaunch")
                 }
@@ -147,7 +147,7 @@ struct SetupView: View {
     private var crmStep: some View {
         if step == .configureCRM || step == .done {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Connect MFSynced to your backend to forward conversations to your team.")
+                Text("Connect Phone Sync to your backend to forward conversations to your team.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
