@@ -701,8 +701,11 @@ actor AuthService {
                                 connection.cancel()
                                 return
                             }
-                            let html = "<html><body>You're signed in — close this window.</body></html>"
-                            let responseText = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+                            // charset is load-bearing: without it browsers
+                            // decode this UTF-8 body as Latin-1 and the em
+                            // dash renders as mojibake ("â€”").
+                            let html = "<html><meta charset=\"utf-8\"><body>You're signed in — close this window.</body></html>"
+                            let responseText = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
                                 + "Content-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
                             connection.send(
                                 content: responseText.data(using: .utf8),
