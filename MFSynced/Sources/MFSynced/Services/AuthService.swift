@@ -288,12 +288,30 @@ private final class CallbackCompletion: @unchecked Sendable {
 // MARK: - AuthService
 
 actor AuthService {
-    enum AuthError: Error {
+    enum AuthError: Error, LocalizedError {
         case signedOut
-        case noBindablePort
+        case noBindablePort(detail: String)
         case invalidCallback
         case tokenExchangeFailed
         case signInTimedOut
+
+        // Spell every failure out for the settings UI — "(AuthError
+        // error 1.)" cost a debugging round-trip that one real sentence
+        // would have avoided.
+        var errorDescription: String? {
+            switch self {
+            case .signedOut:
+                return "Not signed in."
+            case .noBindablePort(let detail):
+                return "Could not open a local sign-in listener — \(detail)"
+            case .invalidCallback:
+                return "The browser sign-in did not complete (bad callback)."
+            case .tokenExchangeFailed:
+                return "Moon Five rejected the sign-in code exchange."
+            case .signInTimedOut:
+                return "Sign-in timed out — the browser window was not completed."
+            }
+        }
     }
 
     private let config: OIDCConfiguration
@@ -546,44 +564,69 @@ actor AuthService {
     // MARK: Loopback listener (integration — untested)
 
     private static func startLoopbackListener(candidatePorts: [Int]) async throws -> (NWListener, Int) {
+        var failures: [String] = []
         for portValue in candidatePorts {
             guard let port = NWEndpoint.Port(rawValue: UInt16(portValue)) else { continue }
 
-            let parameters = NWParameters.tcp
-            // Bind explicitly to the IPv4 loopback address — never a
-            // wildcard bind, so this callback listener is never reachable
-            // from outside this Mac even for the few seconds it's up
-            // during a sign-in.
-            parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
-            // NWListener(using:on:) THROWS whenever requiredLocalEndpoint is
-            // already set — the port must come from the endpoint alone (same
-            // construction ControlServer uses successfully for 127.0.0.1:7891).
-            // Passing both made every candidate port "fail" and surfaced as
-            // AuthError.noBindablePort on every sign-in.
-            guard let listener = try? NWListener(using: parameters) else { continue }
+            // Two constructions, best-first. (a) A loopback-pinned bind —
+            // the socket is never reachable from off-box at all (same
+            // construction ControlServer uses for 127.0.0.1:7891). (b) A
+            // plain wildcard bind as fallback: the vanilla NWListener path,
+            // kept safe by the accept-side loopback peer check plus the
+            // 64-char random `state` the callback must echo. NWListener
+            // rejects (a) with EINVAL on some macOS builds/contexts, which
+            // previously killed every sign-in as `noBindablePort`.
+            var attempts: [(String, () -> NWListener?)] = []
+            attempts.append(("loopback-endpoint", {
+                let parameters = NWParameters.tcp
+                parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
+                // NWListener(using:on:) THROWS whenever requiredLocalEndpoint
+                // is set — the port must come from the endpoint alone.
+                return try? NWListener(using: parameters)
+            }))
+            attempts.append(("wildcard", {
+                try? NWListener(using: .tcp, on: port)
+            }))
 
-            let latch = OneShotLatch()
-            let ready = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                listener.stateUpdateHandler = { state in
-                    switch state {
-                    case .ready:
-                        guard latch.tryFire() else { return }
-                        continuation.resume(returning: true)
-                    case .failed, .cancelled:
-                        guard latch.tryFire() else { return }
-                        continuation.resume(returning: false)
-                    default:
-                        break
-                    }
+            for (mode, make) in attempts {
+                guard let listener = make() else {
+                    failures.append("\(portValue)/\(mode): init threw")
+                    continue
                 }
-                listener.start(queue: .main)
-            }
-            if ready {
+                let latch = OneShotLatch()
+                let failure = await withCheckedContinuation { (continuation: CheckedContinuation<String?, Never>) in
+                    listener.stateUpdateHandler = { state in
+                        switch state {
+                        case .ready:
+                            guard latch.tryFire() else { return }
+                            continuation.resume(returning: nil)
+                        case .failed(let error):
+                            guard latch.tryFire() else { return }
+                            continuation.resume(returning: "failed: \(error)")
+                        case .waiting(let error):
+                            // A listener stuck in .waiting never becomes
+                            // ready on its own here — treat as a failure so
+                            // the loop moves on instead of hanging sign-in.
+                            guard latch.tryFire() else { return }
+                            continuation.resume(returning: "waiting: \(error)")
+                        case .cancelled:
+                            guard latch.tryFire() else { return }
+                            continuation.resume(returning: "cancelled")
+                        default:
+                            break
+                        }
+                    }
+                    listener.start(queue: .main)
+                }
+                if let failure {
+                    failures.append("\(portValue)/\(mode): \(failure)")
+                    listener.cancel()
+                    continue
+                }
                 return (listener, portValue)
             }
-            listener.cancel()
         }
-        throw AuthError.noBindablePort
+        throw AuthError.noBindablePort(detail: failures.joined(separator: "; "))
     }
 
     /// Races the real loopback callback against `signInTimeoutNanoseconds`
@@ -627,6 +670,16 @@ actor AuthService {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
                 completion.attach(continuation)
                 listener.newConnectionHandler = { connection in
+                    // Only the local browser may deliver the callback. The
+                    // wildcard-bind fallback makes this check load-bearing;
+                    // under the loopback-pinned bind it is redundant depth.
+                    if case let .hostPort(host, _) = connection.endpoint {
+                        let peer = "\(host)"
+                        guard peer.hasPrefix("127.") || peer == "::1" || peer.hasPrefix("::1%") else {
+                            connection.cancel()
+                            return
+                        }
+                    }
                     connection.stateUpdateHandler = { state in
                         guard case .ready = state else { return }
                         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, error in
