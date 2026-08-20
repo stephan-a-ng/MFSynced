@@ -501,10 +501,18 @@ actor AuthService {
         )
         let authorizeURL = AuthURLBuilder.authorizeURL(config: scopedConfig, state: state, codeChallenge: challenge)
 
+        // Arm the real callback handler BEFORE opening the browser — with
+        // the placeholder still installed, an instantly-redirecting IdP
+        // session could hit the listener and be cancelled (codex P2).
+        async let pendingCode = Self.awaitCallbackWithTimeout(on: listener, expectedState: state)
+        // One suspension so the child task above actually runs and installs
+        // its newConnectionHandler before the browser can possibly connect.
+        await Task.yield()
+
         let opened = await MainActor.run { NSWorkspace.shared.open(authorizeURL) }
         guard opened else { throw AuthError.invalidCallback }
 
-        let code = try await Self.awaitCallbackWithTimeout(on: listener, expectedState: state)
+        let code = try await pendingCode
 
         let redirectURI = "http://127.0.0.1:\(port)/callback"
         let tokenSet = try await exchangeCode(code: code, codeVerifier: verifier, redirectURI: redirectURI)
@@ -680,12 +688,24 @@ actor AuthService {
                     // Only the local browser may deliver the callback. The
                     // wildcard-bind fallback makes this check load-bearing;
                     // under the loopback-pinned bind it is redundant depth.
-                    if case let .hostPort(host, _) = connection.endpoint {
-                        let peer = "\(host)"
-                        guard peer.hasPrefix("127.") || peer == "::1" || peer.hasPrefix("::1%") else {
-                            connection.cancel()
-                            return
-                        }
+                    // Fail CLOSED: anything that isn't an explicitly
+                    // recognized loopback hostPort (e.g. .opaque endpoints)
+                    // is rejected, not waved through (codex P2).
+                    guard case let .hostPort(host, _) = connection.endpoint else {
+                        connection.cancel()
+                        return
+                    }
+                    let peer = "\(host)"
+                    guard peer.hasPrefix("127.") || peer == "::1" || peer.hasPrefix("::1%") else {
+                        connection.cancel()
+                        return
+                    }
+                    // An accepted connection that never sends anything must
+                    // not outlive the sign-in: give it a hard deadline
+                    // (idempotent — cancel on a finished connection is a
+                    // no-op). Codex P3.
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
+                        connection.cancel()
                     }
                     connection.stateUpdateHandler = { state in
                         guard case .ready = state else { return }
