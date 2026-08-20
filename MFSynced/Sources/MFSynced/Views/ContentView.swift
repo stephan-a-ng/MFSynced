@@ -74,6 +74,12 @@ final class AppState {
         crmService?.chatMaxRowID = { [weak self] in
             (try? self?.chatDB.getMaxRowID()) ?? 0
         }
+        // Heartbeat's send_handle: the phone number/handle this Mac sends
+        // iMessages as, so the console can show who the agent is really
+        // syncing for.
+        crmService?.selfHandleProvider = { [weak self] in
+            self?.chatDB.selfHandle()
+        }
         crmService?.deliveryProbe = { [weak self] phone, afterRowID in
             self?.chatDB.outgoingDeliveryState(identifier: phone, afterRowID: afterRowID)
         }
