@@ -175,11 +175,75 @@ final class CRMSyncService {
     private let session = URLSession.shared
     /// App-process start, for the heartbeat's uptime_seconds.
     private let launchedAt = Date()
+    private let authService: AuthService
+    /// Sent as X-Agent-Name on every request — same value sendHeartbeat()
+    /// already reports as `hostname`.
+    private static let agentHostname: String = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
 
-    init(config: CRMConfig, syncQueue: SyncQueueDatabase = SyncQueueDatabase()) {
+    init(
+        config: CRMConfig,
+        syncQueue: SyncQueueDatabase = SyncQueueDatabase(),
+        // Defaults to an in-memory (never-persisted) token store so unit
+        // tests — none of which inject an AuthService — can never touch
+        // the real system keychain or race a signed-in state left over
+        // from a prior run. Production wires AuthService.shared
+        // (Keychain-backed) explicitly at its one call site
+        // (AppState.startPolling).
+        authService: AuthService = AuthService(tokenStore: InMemoryTokenStore())
+    ) {
         self._config = config
         self.syncQueue = syncQueue
+        self.authService = authService
         crmLog("[CRM] init — isEnabled=\(config.isEnabled) endpoint='\(config.apiEndpoint)' synced=\(config.syncedPhoneNumbers.count)")
+    }
+
+    /// Legacy per-endpoint config predates `targets`: a manually-configured
+    /// endpoint (pre-migration installs) still wins so those setups keep
+    /// working exactly as before. A fresh sign-in-only install never
+    /// populates `apiEndpoint` at all, so this falls back to the first
+    /// configured sync target — the same URL basis pushInbound/syncHistory
+    /// already use via `config.targets`.
+    private var agentEndpoint: String {
+        config.apiEndpoint.isEmpty ? (config.targets.first?.url.absoluteString ?? "") : config.apiEndpoint
+    }
+
+    /// Resolves the Authorization header value for an outbound request:
+    /// prefers the OIDC (OpenID Connect) access token (auto-refreshing through AuthService
+    /// as needed); falls back to the legacy per-agent API key ONLY while
+    /// signed out AND a legacy key is still configured — keeps an
+    /// already-installed agent working through the OIDC migration without
+    /// forcing an immediate re-sign-in. Returns nil when there is truly
+    /// nothing to authenticate with (signed out, no legacy key); callers
+    /// treat that like any other not-configured precondition and skip the
+    /// request for this tick.
+    private func authorizationHeaderValue() async -> String? {
+        if let token = try? await authService.validAccessToken() {
+            return "Bearer \(token)"
+        }
+        guard !config.apiKey.isEmpty else { return nil }
+        return "Bearer \(config.apiKey)"
+    }
+
+    /// Builds one outbound request with the standard auth + agent-identity
+    /// headers every wire call now carries (Authorization, X-Agent-Id,
+    /// X-Agent-Name), plus Content-Type when there's a JSON body.
+    private func makeRequest(url: URL, method: String, body: Data?, authorization: String) -> URLRequest {
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.setValue(authorization, forHTTPHeaderField: "Authorization")
+        request.setValue(config.agentID, forHTTPHeaderField: "X-Agent-Id")
+        request.setValue(Self.agentHostname, forHTTPHeaderField: "X-Agent-Name")
+        if let body {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = body
+        }
+        return request
+    }
+
+    /// Appends `path` onto one sync target's base URL — same string-concat
+    /// convention this file already uses for `config.apiEndpoint`.
+    private func targetURL(_ target: SyncTarget, path: String) -> URL? {
+        URL(string: target.url.absoluteString + path)
     }
 
     func updateConfig(_ config: CRMConfig) {
@@ -189,11 +253,15 @@ final class CRMSyncService {
     }
 
     func startPolling() {
-        guard config.isEnabled, !config.apiEndpoint.isEmpty else {
-            crmLog("[CRM] startPolling: skipped — isEnabled=\(config.isEnabled) endpoint='\(config.apiEndpoint)'")
+        // Endpoint availability checks agentEndpoint (not the raw legacy
+        // apiEndpoint field): a sign-in-only install never populates
+        // apiEndpoint at all, but always has a non-empty sync target to
+        // fall back to.
+        guard config.isEnabled, !agentEndpoint.isEmpty else {
+            crmLog("[CRM] startPolling: skipped — isEnabled=\(config.isEnabled) endpoint='\(agentEndpoint)'")
             return
         }
-        crmLog("[CRM] startPolling: starting timer every \(config.pollIntervalSeconds)s → \(config.apiEndpoint)")
+        crmLog("[CRM] startPolling: starting timer every \(config.pollIntervalSeconds)s → \(agentEndpoint)")
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: config.pollIntervalSeconds, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -266,7 +334,11 @@ final class CRMSyncService {
     func uploadLogs() async {
         let batch = FleetLogBuffer.shared.drain(max: 200)
         guard !batch.isEmpty else { return }
-        guard let url = URL(string: "\(config.apiEndpoint)/logs") else { return }
+        guard let url = URL(string: "\(agentEndpoint)/logs") else { return }
+        guard let authorization = await authorizationHeaderValue() else {
+            FleetLogBuffer.shared.requeue(batch)
+            return
+        }
 
         let iso = ISO8601DateFormatter()
         let lines: [[String: Any]] = batch.map { entry in
@@ -277,13 +349,10 @@ final class CRMSyncService {
                 "line": entry.line,
             ]
         }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(
+        let bodyData = try? JSONSerialization.data(
             withJSONObject: ["agent_id": config.agentID, "lines": lines]
         )
+        let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
         do {
             let (_, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
@@ -342,9 +411,9 @@ final class CRMSyncService {
     /// path also never called `syncHistory` before this change, so this is
     /// a no-op for it either way, not a suppressed duplicate.
     func pullGate() async {
-        guard let url = URL(string: "\(config.apiEndpoint)/gate") else { return }
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        guard let url = URL(string: "\(agentEndpoint)/gate") else { return }
+        guard let authorization = await authorizationHeaderValue() else { return }
+        let request = makeRequest(url: url, method: "GET", body: nil, authorization: authorization)
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return }
@@ -397,12 +466,10 @@ final class CRMSyncService {
     /// legacy backend (404) it falls back to the old local-only add.
     @discardableResult
     func requestGateAdd(_ phone: String) async -> Bool {
-        guard let url = URL(string: "\(config.apiEndpoint)/gate/entries") else { return false }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["phone": phone])
+        guard let url = URL(string: "\(agentEndpoint)/gate/entries") else { return false }
+        guard let authorization = await authorizationHeaderValue() else { return false }
+        let bodyData = try? JSONSerialization.data(withJSONObject: ["phone": phone])
+        let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return false }
@@ -501,9 +568,9 @@ final class CRMSyncService {
 
         let storedCursor = (try? syncQueue.getState(key: Self.contactUpdatesCursorKey)) ?? nil
         let cursor = storedCursor.flatMap(Int.init) ?? 0
-        guard let url = URL(string: "\(config.apiEndpoint)/contact-updates?after=\(cursor)") else { return }
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        guard let url = URL(string: "\(agentEndpoint)/contact-updates?after=\(cursor)") else { return }
+        guard let authorization = await authorizationHeaderValue() else { return }
+        let request = makeRequest(url: url, method: "GET", body: nil, authorization: authorization)
 
         let result: (status: Int, body: Data)?
         if let override = contactUpdatesFetchOverride {
@@ -587,7 +654,8 @@ final class CRMSyncService {
     }
 
     func sendHeartbeat() async {
-        guard let url = URL(string: "\(config.apiEndpoint)/heartbeat") else { return }
+        guard let url = URL(string: "\(agentEndpoint)/heartbeat") else { return }
+        guard let authorization = await authorizationHeaderValue() else { return }
         let body = Self.heartbeatBody(
             config: config,
             hostname: Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
@@ -595,11 +663,8 @@ final class CRMSyncService {
             uptimeSeconds: Int(Date().timeIntervalSince(launchedAt)),
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
         )
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        let bodyData = try? JSONSerialization.data(withJSONObject: body)
+        let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
         do {
             let (_, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
@@ -633,6 +698,7 @@ final class CRMSyncService {
     /// as before.
     func pushContactInfo() async {
         guard let provider = contactInfoProvider else { return }
+        guard let authorization = await authorizationHeaderValue() else { return }
         for phone in config.syncedPhoneNumbers where !pushedContactPhones.contains(phone) {
             let (name, photoJPEG) = provider(phone)
             // Not marked pushed yet: an unresolved contact (ContactStore may
@@ -647,13 +713,9 @@ final class CRMSyncService {
             if let name { payload["name"] = name }
             if let photoJPEG { payload["photo_base64"] = photoJPEG.base64EncodedString() }
 
-            guard let url = URL(string: "\(config.apiEndpoint)/contacts"),
+            guard let url = URL(string: "\(agentEndpoint)/contacts"),
                   let body = try? JSONSerialization.data(withJSONObject: payload) else { continue }
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = body
+            let request = makeRequest(url: url, method: "POST", body: body, authorization: authorization)
 
             switch await contactPushStatusCode(for: request) {
             case 200:
@@ -855,7 +917,7 @@ final class CRMSyncService {
         // endpoint can't be hammered every poll tick.
         lastCatalogUploadAt = now
 
-        guard let url = URL(string: "\(config.apiEndpoint)/catalog") else { return }
+        guard let url = URL(string: "\(agentEndpoint)/catalog") else { return }
         let bodies = Self.catalogBodies(agentID: config.agentID, chats: chats)
         guard !bodies.isEmpty else {
             // Nothing to report (no 1:1 chats yet) is still a real, uploadable
@@ -864,14 +926,14 @@ final class CRMSyncService {
             // appears later is picked up on the very next tick.
             return
         }
+        // Not authenticated (signed out, no legacy key): the 60s floor above
+        // was already touched, but nothing here can be marked successful.
+        guard let authorization = await authorizationHeaderValue() else { return }
 
         var succeeded = true
         for body in bodies {
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+            let bodyData = try? JSONSerialization.data(withJSONObject: body)
+            let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
             do {
                 let (_, response) = try await session.data(for: request)
                 guard let http = response as? HTTPURLResponse else { succeeded = false; continue }
@@ -1219,14 +1281,12 @@ final class CRMSyncService {
         // but never exceed the wire's hard per-POST cap.
         let rows = Array(allRows.prefix(Self.stagedBatchLimit))
 
-        guard let url = URL(string: "\(config.apiEndpoint)/staged") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(
+        guard let url = URL(string: "\(agentEndpoint)/staged") else { return }
+        guard let authorization = await authorizationHeaderValue() else { return }
+        let bodyData = try? JSONSerialization.data(
             withJSONObject: Self.stagedBody(agentID: config.agentID, rows: rows)
         )
+        let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
 
         do {
             let (data, response) = try await session.data(for: request)
@@ -1308,21 +1368,43 @@ final class CRMSyncService {
             return json
         }
         let body: [String: Any] = ["agent_id": config.agentID, "messages": messages]
-        guard let url = URL(string: "\(config.apiEndpoint)/messages/inbound") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return }
 
+        // Every target gets the same payload — replaces the old single
+        // apiEndpoint + optional mirrorApiEndpoint pair. The FIRST target
+        // is authoritative: its response drives isConnected, confirmed-guid
+        // removal, and retry backoff. Every additional target is
+        // fire-and-forget, same as the old mirror POST. Each target
+        // resolves its OWN Authorization header (signed-in OIDC Bearer, or
+        // that target's own legacy key) — never reuses another target's
+        // credential, so a legacy prod key can never reach a staging (or
+        // any other) target's URL.
+        let targets = config.targets
+        guard let primaryTarget = targets.first, let primaryURL = targetURL(primaryTarget, path: "/messages/inbound") else {
+            await MainActor.run { isConnected = false }
+            return
+        }
+        guard let primaryAuthorization = await authService.authorizationHeaderValue(for: primaryTarget) else {
+            for entry in entries {
+                let backoff = min(300.0, 5.0 * pow(2.0, Double(entry.retryCount)))
+                try? syncQueue.incrementRetry(messageGuid: entry.messageGuid, nextRetryIn: backoff)
+            }
+            await MainActor.run { isConnected = false }
+            crmLog("[CRM] pushInbound \(primaryTarget.name): skipped — signed out and no legacy key")
+            return
+        }
+
+        let request = makeRequest(url: primaryURL, method: "POST", body: bodyData, authorization: primaryAuthorization)
         do {
             let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                let status = (response as? HTTPURLResponse)?.statusCode ?? -1
                 for entry in entries {
                     let backoff = min(300.0, 5.0 * pow(2.0, Double(entry.retryCount)))
                     try? syncQueue.incrementRetry(messageGuid: entry.messageGuid, nextRetryIn: backoff)
                 }
                 await MainActor.run { isConnected = false }
+                crmLog("[CRM] pushInbound \(primaryTarget.name): HTTP \(status)")
                 return
             }
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1330,27 +1412,41 @@ final class CRMSyncService {
                 for guid in confirmed { try? syncQueue.remove(messageGuid: guid) }
             }
             await MainActor.run { isConnected = true; lastSyncTime = Date() }
+            crmLog("[CRM] pushInbound \(primaryTarget.name): HTTP 200")
         } catch {
             await MainActor.run { isConnected = false }
+            crmLog("[CRM] pushInbound \(primaryTarget.name): network error: \(error.localizedDescription)")
         }
 
-        // Mirror: fire-and-forget to second backend (failures don't affect primary)
-        if config.hasMirror,
-           let mirrorURL = URL(string: "\(config.mirrorApiEndpoint)/messages/inbound") {
-            var mirrorReq = URLRequest(url: mirrorURL)
-            mirrorReq.httpMethod = "POST"
-            mirrorReq.setValue("Bearer \(config.mirrorApiKey)", forHTTPHeaderField: "Authorization")
-            mirrorReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            mirrorReq.httpBody = try? JSONSerialization.data(withJSONObject: body)
-            _ = try? await session.data(for: mirrorReq)
+        // Mirrors: fire-and-forget to every additional target (failures
+        // don't affect the primary target's outcome above). Never silently
+        // discarded — every mirror's outcome (including a signed-out skip)
+        // gets its own crmLog line.
+        for mirrorTarget in targets.dropFirst() {
+            guard let mirrorURL = targetURL(mirrorTarget, path: "/messages/inbound") else {
+                crmLog("[CRM] pushInbound \(mirrorTarget.name): invalid URL")
+                continue
+            }
+            guard let mirrorAuthorization = await authService.authorizationHeaderValue(for: mirrorTarget) else {
+                crmLog("[CRM] pushInbound \(mirrorTarget.name): skipped — signed out and no legacy key")
+                continue
+            }
+            let mirrorRequest = makeRequest(url: mirrorURL, method: "POST", body: bodyData, authorization: mirrorAuthorization)
+            do {
+                let (_, mirrorResponse) = try await session.data(for: mirrorRequest)
+                let status = (mirrorResponse as? HTTPURLResponse)?.statusCode ?? -1
+                crmLog("[CRM] pushInbound \(mirrorTarget.name): HTTP \(status)")
+            } catch {
+                crmLog("[CRM] pushInbound \(mirrorTarget.name): network error: \(error.localizedDescription)")
+            }
         }
     }
 
     private func pullOutbound() async {
-        crmLog("[CRM] pullOutbound called → \(config.apiEndpoint)/messages/outbound")
-        guard let url = URL(string: "\(config.apiEndpoint)/messages/outbound?agent_id=\(config.agentID)") else { return }
-        var request = URLRequest(url: url)
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        crmLog("[CRM] pullOutbound called → \(agentEndpoint)/messages/outbound")
+        guard let url = URL(string: "\(agentEndpoint)/messages/outbound?agent_id=\(config.agentID)") else { return }
+        guard let authorization = await authorizationHeaderValue() else { return }
+        let request = makeRequest(url: url, method: "GET", body: nil, authorization: authorization)
 
         do {
             let (data, response) = try await session.data(for: request)
@@ -1418,17 +1514,19 @@ final class CRMSyncService {
     }
 
     private func acknowledge(commandID: String, status: String) async {
-        guard let url = URL(string: "\(config.apiEndpoint)/messages/outbound/\(commandID)/ack") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["status": status])
+        guard let url = URL(string: "\(agentEndpoint)/messages/outbound/\(commandID)/ack") else { return }
+        guard let authorization = await authorizationHeaderValue() else { return }
+        let bodyData = try? JSONSerialization.data(withJSONObject: ["status": status])
+        let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
         _ = try? await session.data(for: request)
     }
 
     func syncHistory(chatIdentifier: String, chatDB: ChatDatabase, contactName: String? = nil) async {
         crmLog("[syncHistory] START chatIdentifier=\(chatIdentifier) contact=\(contactName ?? "nil")")
+        guard !config.targets.isEmpty else {
+            crmLog("[syncHistory] skipped — no sync targets configured")
+            return
+        }
         do {
             let messages = try chatDB.fetchMessages(forChat: chatIdentifier, limit: 10000)
             crmLog("[syncHistory] fetched \(messages.count) messages from chat.db")
@@ -1457,40 +1555,35 @@ final class CRMSyncService {
                     continue
                 }
 
-                // Primary
-                if let url = URL(string: "\(config.apiEndpoint)/sync/\(chatIdentifier)/history") {
-                    var req = URLRequest(url: url)
-                    req.httpMethod = "POST"
-                    req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
-                    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    req.httpBody = bodyData
-                    do {
-                        let (data, response) = try await session.data(for: req)
-                        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-                        let body = String(data: data, encoding: .utf8) ?? "<binary>"
-                        crmLog("[syncHistory] primary batch \(batchIdx) → HTTP \(status): \(body.prefix(200))")
-                    } catch {
-                        crmLog("[syncHistory] primary batch \(batchIdx) ERROR: \(error)")
+                // Same payload to every configured target — replaces the old
+                // single apiEndpoint + optional mirrorApiEndpoint pair. Each
+                // target is independently fire-and-forget here (unlike
+                // pushInbound, syncHistory has no single "authoritative"
+                // response to act on — it's a one-shot backfill, not a
+                // queue that needs a confirmed-guid drain). Each target
+                // resolves its OWN Authorization header (signed-in OIDC
+                // Bearer, or that target's own legacy key) — never reuses
+                // another target's credential (see
+                // AuthService.authorizationHeaderValue(for:)), so this is
+                // the SAME derived-targets basis pushInbound uses: gate/
+                // outbound and content always address the same backend(s).
+                for target in config.targets {
+                    guard let url = targetURL(target, path: "/sync/\(chatIdentifier)/history") else {
+                        crmLog("[syncHistory] \(target.name): invalid URL")
+                        continue
                     }
-                } else {
-                    crmLog("[syncHistory] primary: invalid URL from endpoint '\(config.apiEndpoint)'")
-                }
-
-                // Mirror
-                if config.hasMirror,
-                   let mirrorURL = URL(string: "\(config.mirrorApiEndpoint)/sync/\(chatIdentifier)/history") {
-                    var mirrorReq = URLRequest(url: mirrorURL)
-                    mirrorReq.httpMethod = "POST"
-                    mirrorReq.setValue("Bearer \(config.mirrorApiKey)", forHTTPHeaderField: "Authorization")
-                    mirrorReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    mirrorReq.httpBody = bodyData
+                    guard let authorization = await authService.authorizationHeaderValue(for: target) else {
+                        crmLog("[syncHistory] \(target.name): skipped — signed out and no legacy key")
+                        continue
+                    }
+                    let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
                     do {
-                        let (data, response) = try await session.data(for: mirrorReq)
+                        let (data, response) = try await session.data(for: request)
                         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-                        let body = String(data: data, encoding: .utf8) ?? "<binary>"
-                        crmLog("[syncHistory] mirror batch \(batchIdx) → HTTP \(status): \(body.prefix(200))")
+                        let respBody = String(data: data, encoding: .utf8) ?? "<binary>"
+                        crmLog("[syncHistory] \(target.name) batch \(batchIdx) → HTTP \(status): \(respBody.prefix(200))")
                     } catch {
-                        crmLog("[syncHistory] mirror batch \(batchIdx) ERROR: \(error)")
+                        crmLog("[syncHistory] \(target.name) batch \(batchIdx) ERROR: \(error)")
                     }
                 }
             }

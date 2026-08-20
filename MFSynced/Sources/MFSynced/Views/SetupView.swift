@@ -6,10 +6,17 @@ struct SetupView: View {
     var onComplete: () -> Void
 
     @State private var step: Step = .checkingPermission
-    @State private var apiEndpoint: String = ""
-    @State private var apiKey: String = ""
     @State private var ownerEmail: String = ""
     @State private var isCheckingDB = false
+    @State private var isSignedIn = false
+    @State private var signedInEmail: String?
+    @State private var isSigningIn = false
+    @State private var signInError: String?
+    /// Handle to the in-flight sign-in Task so the Cancel button can call
+    /// `.cancel()` on it — cancellation propagates through
+    /// AuthService.signIn()'s internal timeout race, tearing down its
+    /// loopback listener rather than leaving it bound.
+    @State private var signInTask: Task<Void, Never>?
 
     enum Step {
         case checkingPermission
@@ -44,7 +51,7 @@ struct SetupView: View {
                     stepRow(number: 1, title: "Full Disk Access", isComplete: step == .configureCRM || step == .done) {
                         permissionStep
                     }
-                    stepRow(number: 2, title: "Connect to Backend", isComplete: step == .done) {
+                    stepRow(number: 2, title: "Sign in to Moon Five", isComplete: step == .done) {
                         crmStep
                     }
                 }
@@ -72,7 +79,7 @@ struct SetupView: View {
                         finishSetup()
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(apiEndpoint.isEmpty || apiKey.isEmpty)
+                    .disabled(!isSignedIn)
                 }
                 if step == .done {
                     Button("Done") {
@@ -147,30 +154,44 @@ struct SetupView: View {
     private var crmStep: some View {
         if step == .configureCRM || step == .done {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Connect Phone Sync to your backend to forward conversations to your team.")
+                Text("Connect Phone Sync to your Moon Five account to forward conversations to your team.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("API Endpoint")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                    TextField("https://your-backend.example.com", text: $apiEndpoint)
-                        .textFieldStyle(.roundedBorder)
-                }
+                if isSignedIn {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text(signedInEmail.map { "Signed in as \($0)" } ?? "Signed in")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    HStack {
+                        Button {
+                            signIn()
+                        } label: {
+                            if isSigningIn {
+                                ProgressView().scaleEffect(0.7)
+                            } else {
+                                Text("Sign in with Moon Five")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isSigningIn)
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("API Key")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                    SecureField("mfs_...", text: $apiKey)
-                        .textFieldStyle(.roundedBorder)
-                }
+                        if isSigningIn {
+                            Button("Cancel") { signInTask?.cancel() }
+                                .buttonStyle(.bordered)
+                        }
+                    }
 
-                Text("You can find your API key in the web portal under Settings → Mac App.")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+                    if let signInError {
+                        Text(signInError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Owner email")
@@ -241,10 +262,9 @@ struct SetupView: View {
                 isCheckingDB = false
                 if canRead {
                     let existing = CRMConfig.load()
-                    apiEndpoint = existing.apiEndpoint
-                    apiKey = existing.apiKey
                     ownerEmail = existing.ownerEmail
                     step = .configureCRM
+                    Task { await refreshSignInState() }
                 } else {
                     step = .needsPermission
                 }
@@ -256,12 +276,37 @@ struct SetupView: View {
         runPermissionCheck()
     }
 
+    private func refreshSignInState() async {
+        let signedIn = await AuthService.shared.isSignedIn()
+        let email = await AuthService.shared.signedInEmail()
+        await MainActor.run {
+            isSignedIn = signedIn
+            signedInEmail = email
+        }
+    }
+
+    private func signIn() {
+        isSigningIn = true
+        signInError = nil
+        signInTask = Task {
+            do {
+                try await AuthService.shared.signIn()
+                await refreshSignInState()
+            } catch is CancellationError {
+                await MainActor.run { signInError = "Sign-in cancelled" }
+            } catch {
+                await MainActor.run {
+                    signInError = "Sign-in failed: \(error.localizedDescription)"
+                }
+            }
+            await MainActor.run { isSigningIn = false; signInTask = nil }
+        }
+    }
+
     private func saveCRMConfig() {
         var config = CRMConfig.load()
-        config.apiEndpoint = apiEndpoint
-        config.apiKey = apiKey
         config.ownerEmail = ownerEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-        config.isEnabled = !apiEndpoint.isEmpty && !apiKey.isEmpty
+        config.isEnabled = isSignedIn
         config.save()
     }
 

@@ -135,13 +135,27 @@ struct ForwardSheet: View {
 
     // MARK: - Networking
 
+    /// Every network call below routes through the shared auth/endpoint
+    /// resolution (`AuthService.shared.authorizationHeaderValue(for:)`):
+    /// a signed-in OIDC (OpenID Connect) Bearer token for ANY target, or that target's own
+    /// legacy key while signed out — never another target's key. This is
+    /// the SAME resolution CRMSyncService's pushInbound/syncHistory use, so
+    /// team-forward never falls back to a raw `config.apiKey` the way the
+    /// pre-OIDC version of this view did (which meant a signed-in,
+    /// no-legacy-key install could never forward at all).
+
     private func loadTeamMembers() async {
-        guard let url = URL(string: "\(config.apiEndpoint)/users") else {
+        guard let primary = config.targets.first,
+              let url = URL(string: "\(primary.url.absoluteString)/users") else {
+            await MainActor.run { isLoading = false }
+            return
+        }
+        guard let authorization = await AuthService.shared.authorizationHeaderValue(for: primary) else {
             await MainActor.run { isLoading = false }
             return
         }
         var req = URLRequest(url: url)
-        req.setValue("Bearer \(config.apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue(authorization, forHTTPHeaderField: "Authorization")
         do {
             let (data, _) = try await URLSession.shared.data(for: req)
             let decoded = try JSONDecoder().decode([UserDTO].self, from: data)
@@ -156,32 +170,37 @@ struct ForwardSheet: View {
 
     private func doForward() {
         guard let recipientID = selectedMemberID,
-              let recipientEmail = teamMembers.first(where: { $0.id == recipientID })?.email
+              let recipientEmail = teamMembers.first(where: { $0.id == recipientID })?.email,
+              let primary = config.targets.first
         else { return }
         isForwarding = true
         errorMessage = nil
 
         Task {
-            // Forward to primary using the already-loaded recipient ID
-            let primaryOK = await postForward(
-                endpoint: config.apiEndpoint,
-                apiKey: config.apiKey,
-                recipientID: recipientID
-            )
+            // Forward to primary using the already-loaded recipient ID.
+            let primaryOK: Bool
+            if let primaryAuthorization = await AuthService.shared.authorizationHeaderValue(for: primary) {
+                primaryOK = await postForward(
+                    target: primary, authorization: primaryAuthorization, recipientID: recipientID
+                )
+            } else {
+                primaryOK = false
+            }
 
-            // Mirror: resolve the recipient's UUID on the mirror backend by email
-            // (each backend has different UUIDs for the same person)
-            if config.hasMirror {
+            // Every additional target: resolve the recipient's UUID on
+            // that backend by email (each backend has different UUIDs for
+            // the same person), using THAT target's own resolved
+            // credential — never the primary's.
+            for mirrorTarget in config.targets.dropFirst() {
                 Task {
+                    guard let mirrorAuthorization = await AuthService.shared.authorizationHeaderValue(for: mirrorTarget) else {
+                        return
+                    }
                     if let mirrorRecipientID = await resolveUserID(
-                        email: recipientEmail,
-                        endpoint: config.mirrorApiEndpoint,
-                        apiKey: config.mirrorApiKey
+                        email: recipientEmail, target: mirrorTarget, authorization: mirrorAuthorization
                     ) {
                         _ = await postForward(
-                            endpoint: config.mirrorApiEndpoint,
-                            apiKey: config.mirrorApiKey,
-                            recipientID: mirrorRecipientID
+                            target: mirrorTarget, authorization: mirrorAuthorization, recipientID: mirrorRecipientID
                         )
                     }
                 }
@@ -200,23 +219,23 @@ struct ForwardSheet: View {
         }
     }
 
-    /// Looks up a user's ID by email on a given backend.
-    private func resolveUserID(email: String, endpoint: String, apiKey: String) async -> String? {
-        guard let url = URL(string: "\(endpoint)/users") else { return nil }
+    /// Looks up a user's ID by email on one target's backend.
+    private func resolveUserID(email: String, target: SyncTarget, authorization: String) async -> String? {
+        guard let url = URL(string: "\(target.url.absoluteString)/users") else { return nil }
         var req = URLRequest(url: url)
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue(authorization, forHTTPHeaderField: "Authorization")
         guard let (data, _) = try? await URLSession.shared.data(for: req),
               let users = try? JSONDecoder().decode([UserDTO].self, from: data)
         else { return nil }
         return users.first(where: { $0.email == email })?.id
     }
 
-    /// POSTs a forward request. Returns true on HTTP 200.
-    private func postForward(endpoint: String, apiKey: String, recipientID: String) async -> Bool {
-        guard let url = URL(string: "\(endpoint)/forward") else { return false }
+    /// POSTs a forward request to one target. Returns true on HTTP 200.
+    private func postForward(target: SyncTarget, authorization: String, recipientID: String) async -> Bool {
+        guard let url = URL(string: "\(target.url.absoluteString)/forward") else { return false }
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
-        req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        req.setValue(authorization, forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         var body: [String: Any] = [
             "phone": conversation.id,

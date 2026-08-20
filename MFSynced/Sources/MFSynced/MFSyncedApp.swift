@@ -4,10 +4,15 @@ import AppKit
 @main
 struct MFSyncedApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    // ONE AppState shared by the main window and the Settings scene — a
+    // sign-in/out from Settings must reach the same running
+    // CRMSyncService the main window's polling drives (see
+    // AppState.refreshCRMConfigAfterAuthChange).
+    @State private var appState = AppState()
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(appState: appState)
                 // Blank the window title: SwiftUI otherwise paints the app
                 // name ("Phone Sync") into the detail toolbar, wasting space.
                 .navigationTitle("")
@@ -16,7 +21,7 @@ struct MFSyncedApp: App {
         .defaultSize(width: 900, height: 600)
 
         Settings {
-            SettingsView()
+            SettingsView(appState: appState)
         }
     }
 }

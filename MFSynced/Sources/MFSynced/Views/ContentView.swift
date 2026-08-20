@@ -31,7 +31,10 @@ final class AppState {
             print("Failed to get max row ID: \(error)")
         }
 
-        crmService = CRMSyncService(config: crmConfig)
+        // AuthService.shared: the one process-wide, Keychain-backed
+        // instance, so sign-in/out from the Setup/Settings UI takes effect
+        // here immediately without an app relaunch.
+        crmService = CRMSyncService(config: crmConfig, authService: AuthService.shared)
         // Outbound service routing: prefer the service the chat already lives
         // on (SMS threads -> the SMS-forwarding account, so Android
         // recipients get the text immediately instead of a stuck iMessage).
@@ -151,6 +154,24 @@ final class AppState {
         pollTimer?.invalidate()
         pollTimer = nil
         crmService?.stopPolling()
+    }
+
+    /// Re-reads the persisted config and pushes it through the SAME
+    /// onConfigChanged/updateConfig channel pullGate/requestGateAdd already
+    /// use (see `startPolling()`'s wiring) — call after anything that
+    /// persists a CRMConfig change OUTSIDE that channel, e.g. the Settings
+    /// window's Sign In/Sign Out buttons (CRMSyncSettingsView), which save
+    /// via `CRMConfig.save()` directly. Without this, a Settings-window
+    /// sign-in only takes effect after a full app relaunch, since the
+    /// already-running `crmService` never learns its config changed.
+    func refreshCRMConfigAfterAuthChange() {
+        crmConfig = CRMConfig.load()
+        crmService?.updateConfig(crmConfig)
+        if crmConfig.isEnabled {
+            crmService?.startPolling()
+        } else {
+            crmService?.stopPolling()
+        }
     }
 
     func selectConversation(_ conversation: Conversation) {
@@ -349,7 +370,11 @@ final class AppState {
 }
 
 struct ContentView: View {
-    @State private var appState = AppState()
+    // Shared with the Settings scene (see MFSyncedApp) so a sign-in/out in
+    // the Settings window's CRM Sync tab reaches the SAME running
+    // CRMSyncService this view's polling drives — not a second,
+    // disconnected AppState instance.
+    let appState: AppState
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var showSetup = false
 
