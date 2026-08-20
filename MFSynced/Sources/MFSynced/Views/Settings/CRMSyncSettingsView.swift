@@ -2,27 +2,47 @@ import SwiftUI
 
 struct CRMSyncSettingsView: View {
     @State private var config = CRMConfig.load()
+    @State private var isSignedIn = false
+    @State private var signedInEmail: String?
+    @State private var isWorking = false
+    @State private var actionError: String?
 
     var body: some View {
         Form {
-            Section("Connection") {
+            Section("Account") {
                 Toggle("CRM Sync Enabled", isOn: $config.isEnabled)
-                TextField("API Endpoint", text: $config.apiEndpoint, prompt: Text("https://your-backend.com/v1/agent"))
-                SecureField("API Key", text: $config.apiKey, prompt: Text("mf_sk_..."))
+
+                if isSignedIn {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                        Text(signedInEmail.map { "Signed in as \($0)" } ?? "Signed in")
+                        Spacer()
+                        Button("Sign Out") { signOut() }
+                            .buttonStyle(.bordered)
+                            .disabled(isWorking)
+                    }
+                } else {
+                    HStack {
+                        Button("Sign in with Moon Five") { signIn() }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(isWorking)
+                        if isWorking {
+                            ProgressView().scaleEffect(0.7)
+                        }
+                    }
+                }
+                if let actionError {
+                    Text(actionError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+
                 TextField("Owner Email", text: $config.ownerEmail, prompt: Text("you@example.com"))
                 Text("The Message console account that owns this Mac's sync decisions.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
 
-            Section("Mirror Backend (optional)") {
-                TextField("Mirror Endpoint", text: $config.mirrorApiEndpoint, prompt: Text("https://staging.com/v1/agent"))
-                SecureField("Mirror API Key", text: $config.mirrorApiKey, prompt: Text("mf_sk_..."))
-                if config.hasMirror {
-                    Label("All syncs and forwards go to both backends", systemImage: "arrow.triangle.branch")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
                 HStack {
                     Text("Poll interval")
                     Spacer()
@@ -31,6 +51,20 @@ struct CRMSyncSettingsView: View {
                         .textFieldStyle(.roundedBorder)
                     Text("seconds")
                         .foregroundStyle(.secondary)
+                }
+            }
+
+            DisclosureGroup("Advanced") {
+                ForEach(config.targets, id: \.name) { target in
+                    HStack {
+                        Text(target.name.capitalized)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(target.url.absoluteString)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
+                    }
                 }
             }
 
@@ -63,11 +97,46 @@ struct CRMSyncSettingsView: View {
         .formStyle(.grouped)
         .padding()
         .onChange(of: config.isEnabled) { config.save() }
-        .onChange(of: config.apiEndpoint) { config.save() }
-        .onChange(of: config.apiKey) { config.save() }
         .onChange(of: config.ownerEmail) { config.save() }
         .onChange(of: config.pollIntervalSeconds) { config.save() }
-        .onChange(of: config.mirrorApiEndpoint) { config.save() }
-        .onChange(of: config.mirrorApiKey) { config.save() }
+        .task { await refreshSignInState() }
+    }
+
+    private func refreshSignInState() async {
+        let signedIn = await AuthService.shared.isSignedIn()
+        let email = await AuthService.shared.signedInEmail()
+        await MainActor.run {
+            isSignedIn = signedIn
+            signedInEmail = email
+        }
+    }
+
+    private func signIn() {
+        isWorking = true
+        actionError = nil
+        Task {
+            do {
+                try await AuthService.shared.signIn()
+                await refreshSignInState()
+                await MainActor.run {
+                    config.isEnabled = true
+                    config.save()
+                }
+            } catch {
+                await MainActor.run {
+                    actionError = "Sign-in failed: \(error.localizedDescription)"
+                }
+            }
+            await MainActor.run { isWorking = false }
+        }
+    }
+
+    private func signOut() {
+        isWorking = true
+        Task {
+            await AuthService.shared.signOut()
+            await refreshSignInState()
+            await MainActor.run { isWorking = false }
+        }
     }
 }

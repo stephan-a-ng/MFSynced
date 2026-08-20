@@ -31,7 +31,10 @@ final class AppState {
             print("Failed to get max row ID: \(error)")
         }
 
-        crmService = CRMSyncService(config: crmConfig)
+        // AuthService.shared: the one process-wide, Keychain-backed
+        // instance, so sign-in/out from the Setup/Settings UI takes effect
+        // here immediately without an app relaunch.
+        crmService = CRMSyncService(config: crmConfig, authService: AuthService.shared)
         // Outbound service routing: prefer the service the chat already lives
         // on (SMS threads -> the SMS-forwarding account, so Android
         // recipients get the text immediately instead of a stuck iMessage).
