@@ -208,7 +208,7 @@ final class CRMSyncService {
     }
 
     /// Resolves the Authorization header value for an outbound request:
-    /// prefers the OIDC access token (auto-refreshing through AuthService
+    /// prefers the OIDC (OpenID Connect) access token (auto-refreshing through AuthService
     /// as needed); falls back to the legacy per-agent API key ONLY while
     /// signed out AND a legacy key is still configured — keeps an
     /// already-installed agent working through the OIDC migration without
@@ -1372,32 +1372,39 @@ final class CRMSyncService {
 
         // Every target gets the same payload — replaces the old single
         // apiEndpoint + optional mirrorApiEndpoint pair. The FIRST target
-        // ("prod") is authoritative: its response drives isConnected,
-        // confirmed-guid removal, and retry backoff. Every additional
-        // target is fire-and-forget, same as the old mirror POST.
+        // is authoritative: its response drives isConnected, confirmed-guid
+        // removal, and retry backoff. Every additional target is
+        // fire-and-forget, same as the old mirror POST. Each target
+        // resolves its OWN Authorization header (signed-in OIDC Bearer, or
+        // that target's own legacy key) — never reuses another target's
+        // credential, so a legacy prod key can never reach a staging (or
+        // any other) target's URL.
         let targets = config.targets
         guard let primaryTarget = targets.first, let primaryURL = targetURL(primaryTarget, path: "/messages/inbound") else {
             await MainActor.run { isConnected = false }
             return
         }
-        guard let authorization = await authorizationHeaderValue() else {
+        guard let primaryAuthorization = await authService.authorizationHeaderValue(for: primaryTarget) else {
             for entry in entries {
                 let backoff = min(300.0, 5.0 * pow(2.0, Double(entry.retryCount)))
                 try? syncQueue.incrementRetry(messageGuid: entry.messageGuid, nextRetryIn: backoff)
             }
             await MainActor.run { isConnected = false }
+            crmLog("[CRM] pushInbound \(primaryTarget.name): skipped — signed out and no legacy key")
             return
         }
 
-        let request = makeRequest(url: primaryURL, method: "POST", body: bodyData, authorization: authorization)
+        let request = makeRequest(url: primaryURL, method: "POST", body: bodyData, authorization: primaryAuthorization)
         do {
             let (data, response) = try await session.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                let status = (response as? HTTPURLResponse)?.statusCode ?? -1
                 for entry in entries {
                     let backoff = min(300.0, 5.0 * pow(2.0, Double(entry.retryCount)))
                     try? syncQueue.incrementRetry(messageGuid: entry.messageGuid, nextRetryIn: backoff)
                 }
                 await MainActor.run { isConnected = false }
+                crmLog("[CRM] pushInbound \(primaryTarget.name): HTTP \(status)")
                 return
             }
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1405,16 +1412,33 @@ final class CRMSyncService {
                 for guid in confirmed { try? syncQueue.remove(messageGuid: guid) }
             }
             await MainActor.run { isConnected = true; lastSyncTime = Date() }
+            crmLog("[CRM] pushInbound \(primaryTarget.name): HTTP 200")
         } catch {
             await MainActor.run { isConnected = false }
+            crmLog("[CRM] pushInbound \(primaryTarget.name): network error: \(error.localizedDescription)")
         }
 
         // Mirrors: fire-and-forget to every additional target (failures
-        // don't affect the primary target's outcome above).
+        // don't affect the primary target's outcome above). Never silently
+        // discarded — every mirror's outcome (including a signed-out skip)
+        // gets its own crmLog line.
         for mirrorTarget in targets.dropFirst() {
-            guard let mirrorURL = targetURL(mirrorTarget, path: "/messages/inbound") else { continue }
-            let mirrorRequest = makeRequest(url: mirrorURL, method: "POST", body: bodyData, authorization: authorization)
-            _ = try? await session.data(for: mirrorRequest)
+            guard let mirrorURL = targetURL(mirrorTarget, path: "/messages/inbound") else {
+                crmLog("[CRM] pushInbound \(mirrorTarget.name): invalid URL")
+                continue
+            }
+            guard let mirrorAuthorization = await authService.authorizationHeaderValue(for: mirrorTarget) else {
+                crmLog("[CRM] pushInbound \(mirrorTarget.name): skipped — signed out and no legacy key")
+                continue
+            }
+            let mirrorRequest = makeRequest(url: mirrorURL, method: "POST", body: bodyData, authorization: mirrorAuthorization)
+            do {
+                let (_, mirrorResponse) = try await session.data(for: mirrorRequest)
+                let status = (mirrorResponse as? HTTPURLResponse)?.statusCode ?? -1
+                crmLog("[CRM] pushInbound \(mirrorTarget.name): HTTP \(status)")
+            } catch {
+                crmLog("[CRM] pushInbound \(mirrorTarget.name): network error: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -1499,8 +1523,8 @@ final class CRMSyncService {
 
     func syncHistory(chatIdentifier: String, chatDB: ChatDatabase, contactName: String? = nil) async {
         crmLog("[syncHistory] START chatIdentifier=\(chatIdentifier) contact=\(contactName ?? "nil")")
-        guard let authorization = await authorizationHeaderValue() else {
-            crmLog("[syncHistory] skipped — not authenticated (signed out, no legacy key)")
+        guard !config.targets.isEmpty else {
+            crmLog("[syncHistory] skipped — no sync targets configured")
             return
         }
         do {
@@ -1536,14 +1560,20 @@ final class CRMSyncService {
                 // target is independently fire-and-forget here (unlike
                 // pushInbound, syncHistory has no single "authoritative"
                 // response to act on — it's a one-shot backfill, not a
-                // queue that needs a confirmed-guid drain).
-                let targets = config.targets
-                if targets.isEmpty {
-                    crmLog("[syncHistory] no sync targets configured")
-                }
-                for target in targets {
+                // queue that needs a confirmed-guid drain). Each target
+                // resolves its OWN Authorization header (signed-in OIDC
+                // Bearer, or that target's own legacy key) — never reuses
+                // another target's credential (see
+                // AuthService.authorizationHeaderValue(for:)), so this is
+                // the SAME derived-targets basis pushInbound uses: gate/
+                // outbound and content always address the same backend(s).
+                for target in config.targets {
                     guard let url = targetURL(target, path: "/sync/\(chatIdentifier)/history") else {
                         crmLog("[syncHistory] \(target.name): invalid URL")
+                        continue
+                    }
+                    guard let authorization = await authService.authorizationHeaderValue(for: target) else {
+                        crmLog("[syncHistory] \(target.name): skipped — signed out and no legacy key")
                         continue
                     }
                     let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)

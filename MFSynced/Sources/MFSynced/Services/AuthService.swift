@@ -5,9 +5,10 @@ import AppKit
 
 // MARK: - OIDC configuration
 
-/// The Mac agent's OIDC client + loopback redirect shape. Production talks
-/// to the Moon Five user-access IdP (see `.production` for the verified
-/// prod issuer/client); tests construct their own fixture.
+/// The Mac agent's OIDC (OpenID Connect) client + loopback redirect shape.
+/// Production talks to the Moon Five user-access IdP (identity provider)
+/// (see `.production` for the verified prod issuer/client); tests construct
+/// their own fixture.
 struct OIDCConfiguration {
     let issuer: URL
     let clientID: String
@@ -31,17 +32,23 @@ struct OIDCConfiguration {
     )
 }
 
+/// RFC 7636 §4.1's PKCE (Proof Key for Code Exchange) "unreserved"
+/// character set — identical to RFC 3986's unreserved set, so it doubles as
+/// `AuthService.formEncode`'s percent-encoding allow-list below. Defined
+/// once at file scope so both call sites share the exact same set rather
+/// than risking two charsets drifting apart.
+private let unreservedCharacters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+
 // MARK: - PKCE
 
 enum PKCE {
-    private static let unreservedCharset = Array(
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
-    )
+    private static let unreservedCharsetArray = Array(unreservedCharacters)
 
     /// A 64-character verifier drawn from the PKCE unreserved charset
-    /// (RFC 7636 §4.1) via Swift's system (cryptographically secure) RNG.
+    /// (RFC 7636 §4.1) via Swift's system (cryptographically secure) RNG
+    /// (random number generator).
     static func generateVerifier() -> String {
-        String((0..<64).map { _ in unreservedCharset.randomElement()! })
+        String((0..<64).map { _ in unreservedCharsetArray.randomElement()! })
     }
 
     /// S256 code challenge: base64url(SHA256(verifier)), no padding.
@@ -105,18 +112,35 @@ struct TokenSet: Codable, Equatable {
 extension TokenSet {
     private struct TokenEndpointResponse: Decodable {
         let access_token: String
-        let refresh_token: String
+        // Optional: some IdP (identity provider) rotation responses omit
+        // `refresh_token` (a policy choice not to reissue it every time) —
+        // `init` below carries the PREVIOUS refresh token forward in that
+        // case rather than reading an omission as "the refresh token is
+        // now empty."
+        let refresh_token: String?
         let expires_in: Double
+    }
+
+    enum TokenEndpointDecodeError: Error {
+        /// The response omitted `refresh_token` AND the caller had no
+        /// previous one to carry forward (e.g. the very first code
+        /// exchange) — there is truly nothing to persist.
+        case missingRefreshToken
     }
 
     /// Parses a token-endpoint JSON response
     /// (`{access_token, refresh_token, expires_in, ...}`) into a TokenSet,
-    /// anchoring `expiresAt` to `now + expires_in`.
-    init(tokenEndpointJSON data: Data, now: Date) throws {
+    /// anchoring `expiresAt` to `now + expires_in`. `previousRefreshToken`
+    /// carries the caller's current refresh token forward when the
+    /// response omits `refresh_token` (see `TokenEndpointResponse` above).
+    init(tokenEndpointJSON data: Data, now: Date, previousRefreshToken: String? = nil) throws {
         let decoded = try JSONDecoder().decode(TokenEndpointResponse.self, from: data)
+        guard let refreshToken = decoded.refresh_token ?? previousRefreshToken else {
+            throw TokenEndpointDecodeError.missingRefreshToken
+        }
         self.init(
             accessToken: decoded.access_token,
-            refreshToken: decoded.refresh_token,
+            refreshToken: refreshToken,
             expiresAt: now.addingTimeInterval(decoded.expires_in)
         )
     }
@@ -185,6 +209,82 @@ enum LoopbackCallback {
     }
 }
 
+// MARK: - Concurrency-safe latches
+//
+// NWListener/NWConnection callbacks fire on their own dispatch queue, so a
+// bare captured `var` "have I already resumed?" flag is a data race under
+// Swift 6's strict concurrency checking (Sendable closure captures) — these
+// two small lock-guarded boxes replace every such `var` in this file.
+
+/// Thread-safe "first caller wins" latch for a boolean one-shot resume.
+private final class OneShotLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+
+    /// Atomically returns true on the FIRST call only; every call after
+    /// that returns false.
+    func tryFire() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !fired else { return false }
+        fired = true
+        return true
+    }
+}
+
+/// Coordinates the loopback callback's single completion across (a) many
+/// possibly-concurrent inbound connections — only the first one whose
+/// request line `LoopbackCallback.parse` accepts should resume, every other
+/// connection (a stray probe, e.g. a browser favicon fetch) is closed
+/// without resuming — and (b) an external cancellation (the sign-in
+/// timeout, or the UI's Cancel button) that can race the socket callback
+/// from a different queue. All access goes through one lock so exactly one
+/// of "resume with a code" / "cancel" wins, no matter which arrives first
+/// or from which thread.
+private final class CallbackCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<String, Error>?
+    private var finished = false
+
+    /// Stores the continuation this instance will resume exactly once. If
+    /// `cancel()` already fired before this is called (the
+    /// already-cancelled-at-entry edge case), resumes immediately with a
+    /// `CancellationError` instead of waiting on a socket event a cancelled
+    /// sign-in no longer cares about.
+    func attach(_ continuation: CheckedContinuation<String, Error>) {
+        lock.lock()
+        if finished {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        self.continuation = continuation
+        lock.unlock()
+    }
+
+    /// A connection's request line parsed successfully — resumes with its
+    /// code, unless another connection (or a cancellation) already won.
+    func succeed(with code: String) {
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        finished = true
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: code)
+    }
+
+    func cancel() {
+        lock.lock()
+        guard !finished else { lock.unlock(); return }
+        finished = true
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(throwing: CancellationError())
+    }
+}
+
 // MARK: - AuthService
 
 actor AuthService {
@@ -193,6 +293,7 @@ actor AuthService {
         case noBindablePort
         case invalidCallback
         case tokenExchangeFailed
+        case signInTimedOut
     }
 
     private let config: OIDCConfiguration
@@ -240,10 +341,50 @@ actor AuthService {
         guard TokenRefreshPolicy.shouldRefresh(tokenSet, now: Date()) else {
             return tokenSet.accessToken
         }
-        return try await refresh(currentRefreshToken: tokenSet.refreshToken)
+        let refreshed = try await refreshSingleFlight(currentRefreshToken: tokenSet.refreshToken)
+        return refreshed.accessToken
     }
 
-    private func refresh(currentRefreshToken: String) async throws -> String {
+    /// The one in-flight refresh POST, shared by every concurrent caller.
+    /// Actor re-entrancy means a naive per-caller `refresh()` lets N
+    /// concurrent `validAccessToken()` callers each start their OWN POST
+    /// /token with the SAME (stale) refresh token — the IdP rotates AND
+    /// revokes the whole token family on reuse past its ~30s grace window,
+    /// and this actor's own 401 handler then clears the store, forcing
+    /// every one of those callers into a surprise sign-out. Coalescing
+    /// every concurrent caller onto the ONE Task<TokenSet, Error> here
+    /// fixes that.
+    private var inFlightRefresh: Task<TokenSet, Error>?
+
+    private func refreshSingleFlight(currentRefreshToken: String) async throws -> TokenSet {
+        // Re-check the store first: a concurrent caller may have ALREADY
+        // refreshed (and cleared the in-flight slot below) between this
+        // caller's own stale-token snapshot and this call — reusing that
+        // already-rotated refresh token in a FRESH POST would hit the
+        // IdP's reuse-past-grace detection and revoke the whole family.
+        // If the persisted refresh token no longer matches what this
+        // caller started with, someone else already won; just hand back
+        // what they got.
+        if let current = try await tokenStore.load(), current.refreshToken != currentRefreshToken {
+            return current
+        }
+
+        if let inFlight = inFlightRefresh {
+            return try await inFlight.value
+        }
+
+        let task = Task<TokenSet, Error> {
+            try await self.performRefresh(currentRefreshToken: currentRefreshToken)
+        }
+        inFlightRefresh = task
+        // Cleared in `defer`, whichever way the POST turns out — a stuck
+        // slot here would wedge every future refresh behind one that
+        // already finished.
+        defer { inFlightRefresh = nil }
+        return try await task.value
+    }
+
+    private func performRefresh(currentRefreshToken: String) async throws -> TokenSet {
         var request = URLRequest(url: config.issuer.appendingPathComponent("token"))
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -263,9 +404,32 @@ actor AuthService {
             }
             throw AuthError.signedOut
         }
-        let refreshed = try TokenSet(tokenEndpointJSON: data, now: Date())
+        let refreshed = try TokenSet(
+            tokenEndpointJSON: data, now: Date(), previousRefreshToken: currentRefreshToken
+        )
         try await tokenStore.save(refreshed)
-        return refreshed.accessToken
+        return refreshed
+    }
+
+    // MARK: Per-target credential resolution
+
+    /// Resolves the Authorization header value for ONE sync target: this
+    /// service's OIDC Bearer token when signed in — the SAME token for
+    /// every target, since one IdP is trusted everywhere — or, while
+    /// signed out, that target's OWN legacy API key (`SyncTarget.
+    /// legacyKey`) ONLY. Returns nil to mean "skip this target for this
+    /// call": signed out AND this target has no legacy key of its own.
+    /// Never falls back to ANOTHER target's key — that's exactly the
+    /// split-brain bug this method exists to prevent (a legacy prod key
+    /// must never reach a staging target's URL, or vice versa). Shared by
+    /// CRMSyncService (its per-poll wire calls) and ForwardSheet (the
+    /// team-forward UI) so both go through the same resolution rule.
+    func authorizationHeaderValue(for target: SyncTarget) async -> String? {
+        if let token = try? await validAccessToken() {
+            return "Bearer \(token)"
+        }
+        guard let legacyKey = target.legacyKey, !legacyKey.isEmpty else { return nil }
+        return "Bearer \(legacyKey)"
     }
 
     // MARK: Sign in / out
@@ -277,9 +441,10 @@ actor AuthService {
     }
 
     /// Best-effort `email` claim from the stored access token's JWT
-    /// payload, for a "signed in as ..." label — nil whenever that's not
-    /// cheaply available (signed out, or a token shape without an email
-    /// claim); callers fall back to just showing signed-in state.
+    /// (JSON Web Token) payload, for a "signed in as ..." label — nil
+    /// whenever that's not cheaply available (signed out, or a token shape
+    /// without an email claim); callers fall back to just showing
+    /// signed-in state.
     func signedInEmail() async -> String? {
         guard let tokenSet = try? await tokenStore.load() else { return nil }
         return Self.emailClaim(fromJWT: tokenSet.accessToken)
@@ -289,12 +454,22 @@ actor AuthService {
         try? await tokenStore.clear()
     }
 
+    /// A sign-in attempt gives up after this long — an abandoned browser
+    /// tab (closed, or the IdP flow never completed) must not wedge
+    /// `signIn()` forever: each abandoned attempt would otherwise leak its
+    /// bound loopback listener, exhausting `config.redirectURIs`'s three
+    /// candidate ports after just a few tries.
+    private static let signInTimeoutNanoseconds: UInt64 = 180 * 1_000_000_000
+
     /// Runs one full interactive sign-in: PKCE + state, a one-shot loopback
     /// HTTP listener on the first bindable port of `config.redirectURIs`,
-    /// the system browser at the authorize URL, the callback, then the code
-    /// exchange. Integration surface (real sockets + a real browser) —
-    /// untested by the suite, same convention as this file's other live
-    /// network calls.
+    /// the system browser at the authorize URL, the callback (raced
+    /// against `signInTimeoutNanoseconds`), then the code exchange.
+    /// Integration surface (real sockets + a real browser) — untested by
+    /// the suite, same convention as this file's other live network calls.
+    /// The listener is torn down on EVERY exit path — success, throw, or a
+    /// cancellation of the calling Task (the UI's Cancel button) — via
+    /// `defer`.
     func signIn() async throws {
         let verifier = PKCE.generateVerifier()
         let challenge = PKCE.challenge(for: verifier)
@@ -311,8 +486,7 @@ actor AuthService {
         let opened = await MainActor.run { NSWorkspace.shared.open(authorizeURL) }
         guard opened else { throw AuthError.invalidCallback }
 
-        let requestLine = try await Self.awaitCallback(on: listener)
-        let code = try LoopbackCallback.parse(requestLine: requestLine, expectedState: state)
+        let code = try await Self.awaitCallbackWithTimeout(on: listener, expectedState: state)
 
         let redirectURI = "http://127.0.0.1:\(port)/callback"
         let tokenSet = try await exchangeCode(code: code, codeVerifier: verifier, redirectURI: redirectURI)
@@ -336,17 +510,27 @@ actor AuthService {
         return try TokenSet(tokenEndpointJSON: data, now: Date())
     }
 
-    private static func formEncode(_ params: [String: String]) -> String {
-        params.map { key, value in
-            let encoded = value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? value
-            return "\(key)=\(encoded)"
-        }.joined(separator: "&")
+    /// Percent-encodes both keys and values of a form-urlencoded body
+    /// against an unreserved-only charset (RFC 3986 §2.3 — the SAME set
+    /// PKCE's verifier draws from, see `unreservedCharacters`). Anything
+    /// broader (e.g. `CharacterSet.urlQueryAllowed`, which leaves `+`, `/`,
+    /// `=` unescaped) is wrong here: `+` means literal space in
+    /// `application/x-www-form-urlencoded`, so a literal `+`/`/`/`=` in a
+    /// value (or, in principle, a key) MUST be escaped or it corrupts the
+    /// body the token endpoint parses. Internal (not private) for test
+    /// visibility.
+    static func formEncode(_ params: [String: String]) -> String {
+        let allowed = CharacterSet(charactersIn: unreservedCharacters)
+        func encode(_ value: String) -> String {
+            value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+        }
+        return params.map { key, value in "\(encode(key))=\(encode(value))" }.joined(separator: "&")
     }
 
     /// Decodes the `email` claim from a JWT's middle (payload) segment.
     /// Deliberately NOT signature-verified — this only feeds a "signed in
-    /// as ..." label; the JWKS-verified check happens server-side on every
-    /// authenticated call.
+    /// as ..." label; the JWKS (JSON Web Key Set)-verified check happens
+    /// server-side on every authenticated call.
     private static func emailClaim(fromJWT token: String) -> String? {
         let segments = token.split(separator: ".")
         guard segments.count >= 2 else { return nil }
@@ -363,18 +547,25 @@ actor AuthService {
 
     private static func startLoopbackListener(candidatePorts: [Int]) async throws -> (NWListener, Int) {
         for portValue in candidatePorts {
-            guard let port = NWEndpoint.Port(rawValue: UInt16(portValue)),
-                  let listener = try? NWListener(using: .tcp, on: port) else { continue }
+            guard let port = NWEndpoint.Port(rawValue: UInt16(portValue)) else { continue }
+
+            let parameters = NWParameters.tcp
+            // Bind explicitly to the IPv4 loopback address — never a
+            // wildcard bind, so this callback listener is never reachable
+            // from outside this Mac even for the few seconds it's up
+            // during a sign-in.
+            parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
+            guard let listener = try? NWListener(using: parameters, on: port) else { continue }
+
+            let latch = OneShotLatch()
             let ready = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-                var resumed = false
                 listener.stateUpdateHandler = { state in
-                    guard !resumed else { return }
                     switch state {
                     case .ready:
-                        resumed = true
+                        guard latch.tryFire() else { return }
                         continuation.resume(returning: true)
                     case .failed, .cancelled:
-                        resumed = true
+                        guard latch.tryFire() else { return }
                         continuation.resume(returning: false)
                     default:
                         break
@@ -390,39 +581,77 @@ actor AuthService {
         throw AuthError.noBindablePort
     }
 
-    /// Awaits the ONE inbound loopback connection, reads its HTTP request
-    /// line, and answers with a small "you're signed in" page before
-    /// closing the connection.
-    private static func awaitCallback(on listener: NWListener) async throws -> String {
-        try await withCheckedThrowingContinuation { continuation in
-            var resumed = false
-            listener.newConnectionHandler = { connection in
-                guard !resumed else {
-                    connection.cancel()
-                    return
-                }
-                resumed = true
-                connection.stateUpdateHandler = { state in
-                    guard case .ready = state else { return }
-                    connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, error in
-                        guard let data, let text = String(data: data, encoding: .utf8),
-                              let firstLine = text.split(separator: "\r\n", maxSplits: 1).first else {
-                            connection.cancel()
-                            continuation.resume(throwing: error ?? AuthError.invalidCallback)
-                            return
-                        }
-                        let html = "<html><body>You're signed in — close this window.</body></html>"
-                        let responseText = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
-                            + "Content-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
-                        connection.send(
-                            content: responseText.data(using: .utf8),
-                            completion: .contentProcessed { _ in connection.cancel() }
-                        )
-                        continuation.resume(returning: String(firstLine))
-                    }
-                }
-                connection.start(queue: .main)
+    /// Races the real loopback callback against `signInTimeoutNanoseconds`
+    /// — whichever finishes first wins, and `defer` cancels the loser. A
+    /// timeout throws `.signInTimedOut`; either way `awaitCallback`'s own
+    /// `withTaskCancellationHandler` (triggered when this task group
+    /// cancels its sibling) tears down the socket side cleanly.
+    private static func awaitCallbackWithTimeout(
+        on listener: NWListener, expectedState: String
+    ) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask {
+                try await awaitCallback(on: listener, expectedState: expectedState)
             }
+            group.addTask {
+                try await Task.sleep(nanoseconds: signInTimeoutNanoseconds)
+                throw AuthError.signInTimedOut
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw AuthError.signInTimedOut
+            }
+            return result
         }
+    }
+
+    /// Accepts inbound loopback connections until ONE produces a request
+    /// line `LoopbackCallback.parse` accepts (the real OIDC redirect,
+    /// matching `expectedState`) — replies with the "you're signed in"
+    /// page and resolves with its `code`. Any other connection (malformed
+    /// read, wrong/missing state, no code — e.g. a stray browser probe) is
+    /// closed without resuming; the wait continues for the real one.
+    /// Cancellation (the timeout race above, or the UI's Cancel button via
+    /// the enclosing Task) tears the listener down and resumes with a
+    /// `CancellationError` through the SAME `CallbackCompletion`, so a
+    /// late-arriving real connection can never double-resume after a
+    /// cancellation already won.
+    private static func awaitCallback(on listener: NWListener, expectedState: String) async throws -> String {
+        let completion = CallbackCompletion()
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+                completion.attach(continuation)
+                listener.newConnectionHandler = { connection in
+                    connection.stateUpdateHandler = { state in
+                        guard case .ready = state else { return }
+                        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, error in
+                            guard let data, let text = String(data: data, encoding: .utf8),
+                                  let firstLine = text.split(separator: "\r\n", maxSplits: 1).first,
+                                  let code = try? LoopbackCallback.parse(
+                                      requestLine: String(firstLine), expectedState: expectedState
+                                  ) else {
+                                // Not the real callback — a stray
+                                // connection, not a failure: close it and
+                                // keep waiting for the real one.
+                                connection.cancel()
+                                return
+                            }
+                            let html = "<html><body>You're signed in — close this window.</body></html>"
+                            let responseText = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+                                + "Content-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
+                            connection.send(
+                                content: responseText.data(using: .utf8),
+                                completion: .contentProcessed { _ in connection.cancel() }
+                            )
+                            completion.succeed(with: code)
+                        }
+                    }
+                    connection.start(queue: .main)
+                }
+            }
+        }, onCancel: {
+            listener.cancel()
+            completion.cancel()
+        })
     }
 }

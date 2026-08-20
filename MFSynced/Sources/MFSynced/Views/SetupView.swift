@@ -12,6 +12,11 @@ struct SetupView: View {
     @State private var signedInEmail: String?
     @State private var isSigningIn = false
     @State private var signInError: String?
+    /// Handle to the in-flight sign-in Task so the Cancel button can call
+    /// `.cancel()` on it — cancellation propagates through
+    /// AuthService.signIn()'s internal timeout race, tearing down its
+    /// loopback listener rather than leaving it bound.
+    @State private var signInTask: Task<Void, Never>?
 
     enum Step {
         case checkingPermission
@@ -162,17 +167,24 @@ struct SetupView: View {
                             .foregroundStyle(.secondary)
                     }
                 } else {
-                    Button {
-                        signIn()
-                    } label: {
+                    HStack {
+                        Button {
+                            signIn()
+                        } label: {
+                            if isSigningIn {
+                                ProgressView().scaleEffect(0.7)
+                            } else {
+                                Text("Sign in with Moon Five")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isSigningIn)
+
                         if isSigningIn {
-                            ProgressView().scaleEffect(0.7)
-                        } else {
-                            Text("Sign in with Moon Five")
+                            Button("Cancel") { signInTask?.cancel() }
+                                .buttonStyle(.bordered)
                         }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(isSigningIn)
 
                     if let signInError {
                         Text(signInError)
@@ -276,16 +288,18 @@ struct SetupView: View {
     private func signIn() {
         isSigningIn = true
         signInError = nil
-        Task {
+        signInTask = Task {
             do {
                 try await AuthService.shared.signIn()
                 await refreshSignInState()
+            } catch is CancellationError {
+                await MainActor.run { signInError = "Sign-in cancelled" }
             } catch {
                 await MainActor.run {
                     signInError = "Sign-in failed: \(error.localizedDescription)"
                 }
             }
-            await MainActor.run { isSigningIn = false }
+            await MainActor.run { isSigningIn = false; signInTask = nil }
         }
     }
 

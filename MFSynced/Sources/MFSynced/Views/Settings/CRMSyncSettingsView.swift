@@ -1,11 +1,20 @@
 import SwiftUI
 
 struct CRMSyncSettingsView: View {
+    // Shared with ContentView (see MFSyncedApp) so a sign-in/out here
+    // reaches the running CRMSyncService immediately — see
+    // AppState.refreshCRMConfigAfterAuthChange.
+    let appState: AppState
     @State private var config = CRMConfig.load()
     @State private var isSignedIn = false
     @State private var signedInEmail: String?
     @State private var isWorking = false
     @State private var actionError: String?
+    /// Handle to the in-flight sign-in Task so the Cancel button below can
+    /// call `.cancel()` on it — cancellation propagates through
+    /// AuthService.signIn()'s internal timeout race, tearing down its
+    /// loopback listener rather than leaving it bound.
+    @State private var signInTask: Task<Void, Never>?
 
     var body: some View {
         Form {
@@ -29,6 +38,8 @@ struct CRMSyncSettingsView: View {
                             .disabled(isWorking)
                         if isWorking {
                             ProgressView().scaleEffect(0.7)
+                            Button("Cancel") { signInTask?.cancel() }
+                                .buttonStyle(.bordered)
                         }
                     }
                 }
@@ -114,20 +125,25 @@ struct CRMSyncSettingsView: View {
     private func signIn() {
         isWorking = true
         actionError = nil
-        Task {
+        signInTask = Task {
             do {
                 try await AuthService.shared.signIn()
                 await refreshSignInState()
                 await MainActor.run {
                     config.isEnabled = true
                     config.save()
+                    // Push the newly-signed-in config to the LIVE
+                    // CRMSyncService so polling starts without a relaunch.
+                    appState.refreshCRMConfigAfterAuthChange()
                 }
+            } catch is CancellationError {
+                await MainActor.run { actionError = "Sign-in cancelled" }
             } catch {
                 await MainActor.run {
                     actionError = "Sign-in failed: \(error.localizedDescription)"
                 }
             }
-            await MainActor.run { isWorking = false }
+            await MainActor.run { isWorking = false; signInTask = nil }
         }
     }
 
@@ -136,7 +152,10 @@ struct CRMSyncSettingsView: View {
         Task {
             await AuthService.shared.signOut()
             await refreshSignInState()
-            await MainActor.run { isWorking = false }
+            await MainActor.run {
+                appState.refreshCRMConfigAfterAuthChange()
+                isWorking = false
+            }
         }
     }
 }

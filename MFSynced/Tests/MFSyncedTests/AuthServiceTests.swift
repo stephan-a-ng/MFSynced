@@ -272,4 +272,96 @@ final class AuthServiceTests: XCTestCase {
         let persisted = try await store.load()
         XCTAssertNil(persisted, "a 401 refresh must clear the token store (forces re-signIn)")
     }
+
+    // MARK: - Refresh single-flight (P1-1: stampede fix)
+
+    func testConcurrentValidAccessTokenCallsShareExactlyOneTransportInvocation() async throws {
+        let now = Date()
+        let store = InMemoryTokenStore()
+        try await store.save(makeStaleTokenSet(now: now))
+
+        // Only ONE response queued on purpose: if single-flight coalescing
+        // is broken, a second independent POST would find the queue empty
+        // and throw, failing this test outright.
+        let refreshedJSON = """
+        {"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600,"token_type":"Bearer"}
+        """.data(using: .utf8)!
+        let transport = RecordingTransport(responses: [(200, refreshedJSON)])
+        let service = AuthService(config: testConfig, tokenStore: store, transport: transport.handle)
+
+        async let first = service.validAccessToken()
+        async let second = service.validAccessToken()
+        let (firstToken, secondToken) = try await (first, second)
+
+        XCTAssertEqual(firstToken, "rotated-access")
+        XCTAssertEqual(secondToken, "rotated-access")
+
+        let requests = await transport.requests
+        XCTAssertEqual(
+            requests.count, 1,
+            "two concurrent callers racing the SAME stale token must share ONE refresh POST, not one each"
+        )
+    }
+
+    // MARK: - formEncode (P2: percent-encode keys AND values)
+
+    func testFormEncodePercentEncodesReservedCharactersInValues() {
+        let encoded = AuthService.formEncode(["k": "abc+def/ghi="])
+        XCTAssertEqual(encoded, "k=abc%2Bdef%2Fghi%3D")
+    }
+
+    // MARK: - TokenSet (P3: refresh_token optional, carries previous forward)
+
+    func testTokenSetCarriesForwardPreviousRefreshTokenWhenOmitted() throws {
+        let json = """
+        {"access_token":"a2","expires_in":3600,"token_type":"Bearer"}
+        """.data(using: .utf8)!
+        let tokenSet = try TokenSet(
+            tokenEndpointJSON: json, now: Date(), previousRefreshToken: "carried-forward-refresh"
+        )
+        XCTAssertEqual(tokenSet.accessToken, "a2")
+        XCTAssertEqual(tokenSet.refreshToken, "carried-forward-refresh")
+    }
+
+    func testTokenSetThrowsWhenRefreshTokenOmittedAndNoPreviousProvided() {
+        let json = """
+        {"access_token":"a2","expires_in":3600,"token_type":"Bearer"}
+        """.data(using: .utf8)!
+        XCTAssertThrowsError(try TokenSet(tokenEndpointJSON: json, now: Date()))
+    }
+
+    // MARK: - Per-target credential resolution (P1-2)
+
+    func testAuthorizationHeaderForTargetUsesOIDCBearerWhenSignedIn() async throws {
+        let store = InMemoryTokenStore()
+        try await store.save(
+            TokenSet(accessToken: "signed-in-access", refreshToken: "r", expiresAt: Date().addingTimeInterval(3600))
+        )
+        let service = AuthService(config: testConfig, tokenStore: store, transport: RecordingTransport().handle)
+
+        // Even a target with NO legacy key of its own gets the shared OIDC
+        // Bearer token when signed in — one IdP, trusted everywhere.
+        let target = SyncTarget(name: "staging", url: URL(string: "https://staging.example.com/v1/agent")!)
+        let header = await service.authorizationHeaderValue(for: target)
+        XCTAssertEqual(header, "Bearer signed-in-access")
+    }
+
+    func testAuthorizationHeaderForTargetUsesThatTargetsOwnLegacyKeyWhenSignedOut() async {
+        let service = AuthService(
+            config: testConfig, tokenStore: InMemoryTokenStore(), transport: RecordingTransport().handle
+        )
+        let primary = SyncTarget(
+            name: "primary", url: URL(string: "https://example.com/v1/agent")!, legacyKey: "prod-key"
+        )
+        let mirror = SyncTarget(name: "mirror", url: URL(string: "https://mirror.example.com/v1/agent")!)
+
+        let primaryHeader = await service.authorizationHeaderValue(for: primary)
+        let mirrorHeader = await service.authorizationHeaderValue(for: mirror)
+
+        XCTAssertEqual(primaryHeader, "Bearer prod-key")
+        XCTAssertNil(
+            mirrorHeader,
+            "a target with no legacy key of its own must be SKIPPED while signed out — never fall back to another target's key"
+        )
+    }
 }

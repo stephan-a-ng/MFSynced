@@ -20,6 +20,11 @@ open "/Applications/Phone Sync.app"
 **After every rebuild:** The ad-hoc re-signing revokes Full Disk Access.
 Go to **System Settings → Privacy & Security → Full Disk Access** and re-enable Phone Sync.
 
+An ad-hoc re-sign also changes the binary's identity as far as the Keychain
+is concerned, so the OIDC sign-in token (stored via `kSecUseDataProtectionKeychain`)
+will prompt for Keychain access again on first use after each rebuild —
+approve it, same as the Full Disk Access re-grant above.
+
 ---
 
 ## Backend API (staging + production)

@@ -149,7 +149,11 @@ private struct ConversationRow: View {
     @State private var isHovered = false
     @State private var showForwardPopover = false
 
-    private var canForward: Bool { !crmConfig.apiEndpoint.isEmpty }
+    // Gates on the resolved primary endpoint (config.targets — the same
+    // basis CRMSyncService/ForwardSheet address), not the legacy
+    // apiEndpoint alone: a fresh OIDC (OpenID Connect)-only install never
+    // populates apiEndpoint, but always has a target to forward to.
+    private var canForward: Bool { !crmConfig.targets.isEmpty }
 
     var body: some View {
         HStack(spacing: 10) {
