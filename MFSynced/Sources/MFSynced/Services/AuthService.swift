@@ -555,7 +555,12 @@ actor AuthService {
             // from outside this Mac even for the few seconds it's up
             // during a sign-in.
             parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: port)
-            guard let listener = try? NWListener(using: parameters, on: port) else { continue }
+            // NWListener(using:on:) THROWS whenever requiredLocalEndpoint is
+            // already set — the port must come from the endpoint alone (same
+            // construction ControlServer uses successfully for 127.0.0.1:7891).
+            // Passing both made every candidate port "fail" and surfaced as
+            // AuthError.noBindablePort on every sign-in.
+            guard let listener = try? NWListener(using: parameters) else { continue }
 
             let latch = OneShotLatch()
             let ready = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
