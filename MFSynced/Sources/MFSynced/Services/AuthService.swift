@@ -245,14 +245,26 @@ private final class CallbackCompletion: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<String, Error>?
     private var finished = false
+    // A code that arrived BEFORE any continuation attached. The handler is
+    // armed before the browser opens (so no callback can be missed), which
+    // means an instantly-redirecting IdP session can legitimately deliver
+    // the code before signIn() gets around to awaiting it — buffer it
+    // rather than dropping it.
+    private var bufferedCode: String?
 
     /// Stores the continuation this instance will resume exactly once. If
-    /// `cancel()` already fired before this is called (the
-    /// already-cancelled-at-entry edge case), resumes immediately with a
+    /// the code already arrived (instant-redirect race), resumes with it
+    /// right away; if `cancel()` already fired, resumes immediately with a
     /// `CancellationError` instead of waiting on a socket event a cancelled
     /// sign-in no longer cares about.
     func attach(_ continuation: CheckedContinuation<String, Error>) {
         lock.lock()
+        if let code = bufferedCode {
+            bufferedCode = nil
+            lock.unlock()
+            continuation.resume(returning: code)
+            return
+        }
         if finished {
             lock.unlock()
             continuation.resume(throwing: CancellationError())
@@ -264,12 +276,17 @@ private final class CallbackCompletion: @unchecked Sendable {
 
     /// A connection's request line parsed successfully — resumes with its
     /// code, unless another connection (or a cancellation) already won.
+    /// With no continuation attached yet, the code is buffered for the
+    /// upcoming `attach`.
     func succeed(with code: String) {
         lock.lock()
         guard !finished else { lock.unlock(); return }
         finished = true
         let pending = continuation
         continuation = nil
+        if pending == nil {
+            bufferedCode = code
+        }
         lock.unlock()
         pending?.resume(returning: code)
     }
@@ -501,18 +518,17 @@ actor AuthService {
         )
         let authorizeURL = AuthURLBuilder.authorizeURL(config: scopedConfig, state: state, codeChallenge: challenge)
 
-        // Arm the real callback handler BEFORE opening the browser — with
-        // the placeholder still installed, an instantly-redirecting IdP
-        // session could hit the listener and be cancelled (codex P2).
-        async let pendingCode = Self.awaitCallbackWithTimeout(on: listener, expectedState: state)
-        // One suspension so the child task above actually runs and installs
-        // its newConnectionHandler before the browser can possibly connect.
-        await Task.yield()
+        // Arm the real callback handler SYNCHRONOUSLY before the browser is
+        // ever opened — an instantly-redirecting IdP session must find the
+        // real handler, not a placeholder (codex P2; Task.yield gives no
+        // ordering guarantee, so this is a plain synchronous call). A code
+        // that lands before the await below is buffered by the completion.
+        let completion = Self.armCallbackHandler(on: listener, expectedState: state)
 
         let opened = await MainActor.run { NSWorkspace.shared.open(authorizeURL) }
         guard opened else { throw AuthError.invalidCallback }
 
-        let code = try await pendingCode
+        let code = try await Self.awaitCallbackWithTimeout(completion, listener: listener)
 
         let redirectURI = "http://127.0.0.1:\(port)/callback"
         let tokenSet = try await exchangeCode(code: code, codeVerifier: verifier, redirectURI: redirectURI)
@@ -650,11 +666,11 @@ actor AuthService {
     /// `withTaskCancellationHandler` (triggered when this task group
     /// cancels its sibling) tears down the socket side cleanly.
     private static func awaitCallbackWithTimeout(
-        on listener: NWListener, expectedState: String
+        _ completion: CallbackCompletion, listener: NWListener
     ) async throws -> String {
         try await withThrowingTaskGroup(of: String.self) { group in
             group.addTask {
-                try await awaitCallback(on: listener, expectedState: expectedState)
+                try await awaitArmedCallback(completion, listener: listener)
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: signInTimeoutNanoseconds)
@@ -679,12 +695,16 @@ actor AuthService {
     /// `CancellationError` through the SAME `CallbackCompletion`, so a
     /// late-arriving real connection can never double-resume after a
     /// cancellation already won.
-    private static func awaitCallback(on listener: NWListener, expectedState: String) async throws -> String {
+    /// Installs the REAL callback connection handler — synchronously, so
+    /// the caller can prove the handler is armed before the browser is ever
+    /// opened (an instantly-redirecting IdP session must not race a
+    /// placeholder handler; codex P2). The returned completion buffers a
+    /// code that lands before anyone awaits it.
+    private static func armCallbackHandler(
+        on listener: NWListener, expectedState: String
+    ) -> CallbackCompletion {
         let completion = CallbackCompletion()
-        return try await withTaskCancellationHandler(operation: {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-                completion.attach(continuation)
-                listener.newConnectionHandler = { connection in
+        listener.newConnectionHandler = { connection in
                     // Only the local browser may deliver the callback. The
                     // wildcard-bind fallback makes this check load-bearing;
                     // under the loopback-pinned bind it is redundant depth.
@@ -735,7 +755,21 @@ actor AuthService {
                         }
                     }
                     connection.start(queue: .main)
-                }
+        }
+        return completion
+    }
+
+    /// Awaits a code from an ALREADY-ARMED handler (`armCallbackHandler`).
+    /// Cancellation (from the timeout race or the enclosing Task) tears the
+    /// listener down and resumes with a `CancellationError` through the
+    /// SAME `CallbackCompletion`, so a late-arriving real connection can
+    /// never double-resume after a cancellation already won.
+    private static func awaitArmedCallback(
+        _ completion: CallbackCompletion, listener: NWListener
+    ) async throws -> String {
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+                completion.attach(continuation)
             }
         }, onCancel: {
             listener.cancel()
