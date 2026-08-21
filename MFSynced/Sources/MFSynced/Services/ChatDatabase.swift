@@ -209,6 +209,85 @@ final class ChatDatabase {
         return (sqlite3_column_int(stmt, 0) == 1, Int(sqlite3_column_int(stmt, 1)))
     }
 
+    /// The best guess at "the phone number/handle used on this Mac" — for
+    /// reporting this Mac's own identity to the nexus (heartbeat's
+    /// `send_handle`). Derived from the `chat` table's
+    /// `last_addressed_handle` column: Messages stamps this with the LOCAL
+    /// side's own handle for that conversation (the number/email THIS Mac
+    /// was addressed on) — not the peer's handle, which lives on
+    /// `handle.id` instead. One candidate row per chat that has a
+    /// non-empty value, paired with that chat's own latest message date;
+    /// `selectSelfHandle` (pure, no chat.db) does the actual pick.
+    func selfHandle() -> String? {
+        guard let db = try? openConnection() else { return nil }
+        defer { sqlite3_close(db) }
+
+        let sql = """
+            SELECT c.last_addressed_handle, MAX(m.date) AS last_activity
+            FROM chat c
+            LEFT JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
+            LEFT JOIN message m ON cmj.message_id = m.ROWID
+            WHERE c.last_addressed_handle IS NOT NULL AND c.last_addressed_handle != ''
+            GROUP BY c.ROWID
+            """
+
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+
+        var candidates: [(handle: String?, lastActivity: Date)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let handle = columnText(stmt, 0)
+            // A chat with no joined messages (last_addressed_handle set but
+            // nothing ever sent/received) has no MAX(m.date) to rank
+            // it by — treat it as the least-recently-active candidate
+            // rather than crashing the sort on a missing value.
+            let lastActivity = AppleDateConverter.toDate(sqlite3_column_int64(stmt, 1)) ?? Date.distantPast
+            candidates.append((handle: handle, lastActivity: lastActivity))
+        }
+        return Self.selectSelfHandle(from: candidates)
+    }
+
+    /// Pure selection over `selfHandle()`'s candidate rows — no chat.db, so
+    /// it's directly testable with hand-built candidate lists (see
+    /// SendHandleTests). Rules, in order:
+    /// 1. Drop nil/empty/whitespace-only handles.
+    /// 2. If any candidate looks like a phone number (starts with "+"),
+    ///    restrict to those — the product ask is specifically "the phone
+    ///    number used on that Mac", so a `+1555…` candidate always beats
+    ///    an email like `me@icloud.com` regardless of which is more
+    ///    recent.
+    /// 3. Within the remaining pool, prefer the most-recently-active
+    ///    chat's value (max `lastActivity`).
+    /// 4. On a tie at that timestamp (e.g. two chats sharing one
+    ///    coarse-grained date, or multiple candidates defaulted to
+    ///    `Date.distantPast`), fall back to the most common value AMONG
+    ///    THE TIED NEWEST candidates only — never the whole pool, or an
+    ///    older-but-chattier handle would beat the most recent one; a
+    ///    further tie breaks alphabetically for a deterministic result.
+    static func selectSelfHandle(from candidates: [(handle: String?, lastActivity: Date)]) -> String? {
+        let nonEmpty: [(handle: String, lastActivity: Date)] = candidates.compactMap { candidate in
+            guard let handle = candidate.handle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !handle.isEmpty else { return nil }
+            return (handle, candidate.lastActivity)
+        }
+        guard !nonEmpty.isEmpty else { return nil }
+
+        let phoneLooking = nonEmpty.filter { $0.handle.hasPrefix("+") }
+        let pool = phoneLooking.isEmpty ? nonEmpty : phoneLooking
+
+        let newestActivity = pool.map(\.lastActivity).max()!
+        let newest = pool.filter { $0.lastActivity == newestActivity }
+        if newest.count == 1 {
+            return newest[0].handle
+        }
+
+        var counts: [String: Int] = [:]
+        for row in newest { counts[row.handle, default: 0] += 1 }
+        let maxCount = counts.values.max() ?? 0
+        return counts.filter { $0.value == maxCount }.keys.sorted().first
+    }
+
     private func queryService(_ db: OpaquePointer, sql: String, bind: String) -> String? {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }

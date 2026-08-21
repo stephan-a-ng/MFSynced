@@ -83,8 +83,8 @@ final class CRMSyncService {
     /// Test seam for `pushContactInfo()`'s `/contacts` POST: when set, the
     /// request is routed through this closure instead of a real `URLSession`
     /// call, returning the HTTP status code to react to (nil simulates a
-    /// network failure / no response). Same closure-override DI convention
-    /// as `chatServiceHint`/`contactInfoProvider` — nil in production, so the
+    /// network failure / no response). Same closure-override DI (dependency
+    /// injection) convention as `chatServiceHint`/`contactInfoProvider` — nil in production, so the
     /// real network path always runs there; tests set it to exercise the
     /// 200/404/5xx branches without a live endpoint. Internal (not private)
     /// for test visibility.
@@ -137,6 +137,34 @@ final class CRMSyncService {
     var lastContactUpdatesPollAt: TimeInterval?
     /// Overridable by tests, same rationale as `catalogMinIntervalSeconds`.
     var contactUpdatesMinIntervalSeconds: TimeInterval = 60
+    /// Best-guess "phone number/handle used on this Mac", for the
+    /// heartbeat's `send_handle` — production wires
+    /// ChatDatabase.selfHandle() (sqlite-backed, so DI like
+    /// catalogChatsProvider/chatServiceHint keeps this testable without a
+    /// live chat.db). nil (unset, or the provider itself returning nil)
+    /// just omits `send_handle` from the heartbeat, same degrade as a
+    /// blank owner_email.
+    var selfHandleProvider: (() -> String?)?
+    /// `currentSendHandle()`'s cache — in-memory only, same rationale as
+    /// `lastCatalogUploadAt`/`lastCatalogFingerprint`: a relaunch
+    /// re-querying is fine and intended. UNLIKE most of this class's other
+    /// poll-gating vars, this pair IS lock-protected (`sendHandleLock`):
+    /// `poll()` is NOT actually serialized end-to-end despite
+    /// `pollInFlight` — `ControlServer.handlePoll()` calls
+    /// `syncService.poll()` directly from its own `Task` for its
+    /// localhost e2e-testing control API, with no `pollInFlight` check at
+    /// all, so a timer-driven `poll()` and a ControlServer-driven one can
+    /// run concurrently against the same instance and both reach
+    /// `sendHeartbeat()` at once. (That gap pre-exists this change and
+    /// also affects `lastCatalogUploadAt`/`lastContactUpdatesPollAt` —
+    /// out of scope here, but not repeated for this new state.) Internal
+    /// for test visibility; mutate only through `currentSendHandle()` so
+    /// the lock is never bypassed.
+    var cachedSendHandle: String?
+    var lastSendHandleQueryAt: TimeInterval?
+    /// Overridable by tests, same rationale as `catalogMinIntervalSeconds`.
+    var sendHandleCacheIntervalSeconds: TimeInterval = 600
+    private let sendHandleLock = NSLock()
     /// chat.db's current max message ROWID — watermark taken just before a
     /// send so the verifier can find the row that send created.
     var chatMaxRowID: (() -> Int64)?
@@ -630,7 +658,8 @@ final class CRMSyncService {
         hostname: String,
         osVersion: String,
         uptimeSeconds: Int,
-        appVersion: String?
+        appVersion: String?,
+        sendHandle: String? = nil
     ) -> [String: Any] {
         var body: [String: Any] = [
             "agent_id": config.agentID,
@@ -650,7 +679,62 @@ final class CRMSyncService {
         if !trimmedOwnerEmail.isEmpty {
             body["owner_email"] = trimmedOwnerEmail
         }
+        // Same omit-when-blank convention as owner_email above. The nexus
+        // contract caps this at 255 chars; ChatDatabase.selfHandle() (via
+        // selectSelfHandle) only ever returns a chat.db handle string,
+        // which is nowhere near that length in practice, so no truncation
+        // is applied here.
+        if let trimmedSendHandle = sendHandle?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !trimmedSendHandle.isEmpty {
+            body["send_handle"] = trimmedSendHandle
+        }
         return body
+    }
+
+    /// Returns the cached self-handle, re-querying `selfHandleProvider` only
+    /// when the cache is empty or older than `sendHandleCacheIntervalSeconds`
+    /// — chat.db's `selfHandle()` opens a sqlite connection and scans every
+    /// chat row, far more than a 5s poll tick should pay for a value that
+    /// essentially never changes mid-session. The timestamp is updated on
+    /// every re-query, including a nil result, so a chat.db read error
+    /// doesn't turn into a retry-every-tick loop.
+    ///
+    /// Lock-protected (`sendHandleLock`), NOT relying on `poll()`
+    /// serialization: `ControlServer`'s localhost `/poll` endpoint can call
+    /// `syncService.poll()` (→ `sendHeartbeat()` → this method) concurrently
+    /// with the timer-driven poll — see the doc comment on
+    /// `cachedSendHandle`. The provider itself runs OUTSIDE the lock: it
+    /// opens its own sqlite connection per call (`ChatDatabase.selfHandle()`
+    /// makes no shared-state assumption), so a concurrent provider call from
+    /// a losing thread is redundant work, not a correctness problem — only
+    /// the cache fields themselves need mutual exclusion. Internal (not
+    /// private) for direct test access without going through the async
+    /// network path in `sendHeartbeat()`.
+    func currentSendHandle() -> String? {
+        guard let provider = selfHandleProvider else { return nil }
+        let now = ProcessInfo.processInfo.systemUptime
+
+        sendHandleLock.lock()
+        if let last = lastSendHandleQueryAt, now - last < sendHandleCacheIntervalSeconds {
+            let cached = cachedSendHandle
+            sendHandleLock.unlock()
+            return cached
+        }
+        sendHandleLock.unlock()
+
+        // Provider call happens outside the lock (see doc comment) — two
+        // threads can race into here and both call the provider, but each
+        // then re-takes the lock to publish, so the cache never observes a
+        // half-written state and always ends up with SOME valid result
+        // (whichever thread writes last), never a torn value.
+        let result = provider()
+
+        sendHandleLock.lock()
+        lastSendHandleQueryAt = now
+        cachedSendHandle = result
+        sendHandleLock.unlock()
+
+        return result
     }
 
     func sendHeartbeat() async {
@@ -661,7 +745,8 @@ final class CRMSyncService {
             hostname: Host.current().localizedName ?? ProcessInfo.processInfo.hostName,
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             uptimeSeconds: Int(Date().timeIntervalSince(launchedAt)),
-            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
+            sendHandle: currentSendHandle()
         )
         let bodyData = try? JSONSerialization.data(withJSONObject: body)
         let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
