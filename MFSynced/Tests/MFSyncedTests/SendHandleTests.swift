@@ -4,9 +4,9 @@ import XCTest
 /// Covers the pure parts of the "report this Mac's own handle to the
 /// nexus" feature: `CRMSyncService.heartbeatBody`'s `send_handle` field,
 /// and `ChatDatabase.selectSelfHandle`'s candidate-picking logic. Neither
-/// touches chat.db or the network — see ChatDatabaseTests for the
-/// (real-chat.db, XCTSkip-if-unavailable) integration coverage of
-/// `selfHandle()` itself.
+/// touches chat.db or the network. `selfHandle()`'s real-chat.db SQL path,
+/// the 10-minute cache window, and cross-thread cache behavior have NO
+/// automated coverage — they are exercised only by running the app.
 final class SendHandleTests: XCTestCase {
 
     // MARK: - heartbeatBody
@@ -138,5 +138,23 @@ final class SendHandleTests: XCTestCase {
         ]
 
         XCTAssertEqual(ChatDatabase.selectSelfHandle(from: candidates), "+15551234567")
+    }
+
+    func testTieAtNewestNeverLosesToOlderButMoreCommonHandle() {
+        // Codex P2 regression: frequency must be counted among the TIED
+        // NEWEST candidates only — an older handle repeated three times
+        // must not beat the two handles tied at the newest timestamp.
+        let newest = date(9000)
+        let older = date(1000)
+        let candidates: [(handle: String?, lastActivity: Date)] = [
+            (handle: "+15550001111", lastActivity: newest),
+            (handle: "+15559998888", lastActivity: newest),
+            (handle: "+15553334444", lastActivity: older),
+            (handle: "+15553334444", lastActivity: older),
+            (handle: "+15553334444", lastActivity: older),
+        ]
+
+        // Tie among the newest resolves alphabetically within that set.
+        XCTAssertEqual(ChatDatabase.selectSelfHandle(from: candidates), "+15550001111")
     }
 }

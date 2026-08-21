@@ -261,9 +261,10 @@ final class ChatDatabase {
     ///    chat's value (max `lastActivity`).
     /// 4. On a tie at that timestamp (e.g. two chats sharing one
     ///    coarse-grained date, or multiple candidates defaulted to
-    ///    `Date.distantPast`), fall back to the most common non-empty
-    ///    value in the pool; a further tie breaks alphabetically for a
-    ///    deterministic result.
+    ///    `Date.distantPast`), fall back to the most common value AMONG
+    ///    THE TIED NEWEST candidates only — never the whole pool, or an
+    ///    older-but-chattier handle would beat the most recent one; a
+    ///    further tie breaks alphabetically for a deterministic result.
     static func selectSelfHandle(from candidates: [(handle: String?, lastActivity: Date)]) -> String? {
         let nonEmpty: [(handle: String, lastActivity: Date)] = candidates.compactMap { candidate in
             guard let handle = candidate.handle?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -282,7 +283,7 @@ final class ChatDatabase {
         }
 
         var counts: [String: Int] = [:]
-        for row in pool { counts[row.handle, default: 0] += 1 }
+        for row in newest { counts[row.handle, default: 0] += 1 }
         let maxCount = counts.values.max() ?? 0
         return counts.filter { $0.value == maxCount }.keys.sorted().first
     }
