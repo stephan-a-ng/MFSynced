@@ -22,8 +22,9 @@ struct OIDCConfiguration {
 
     /// Verified deployment ground truth (2026-08-20): access.moonfive.tech
     /// does not resolve, and users-api.moonfive.tech's tokens still carry
-    /// the run.app `iss` — always authorize/refresh against the run.app
-    /// issuer directly, never an alias.
+    /// the run.app `iss` — so SERVERS must validate `iss` against the
+    /// run.app URL. This CLIENT never checks `iss`, which is what makes
+    /// the alias endpoint below safe (and necessary — see its comment).
     static let production = OIDCConfiguration(
         // The CUSTOM-DOMAIN alias, deliberately: some Moon Five networks
         // filter `*.run.app` DNS (moonfive-insight), which silently kills
