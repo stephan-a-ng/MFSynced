@@ -10,6 +10,7 @@ struct CRMSyncSettingsView: View {
     @State private var signedInEmail: String?
     @State private var isWorking = false
     @State private var actionError: String?
+    @State private var signInStartedAt: Date?
     /// Handle to the in-flight sign-in Task so the Cancel button below can
     /// call `.cancel()` on it — cancellation propagates through
     /// AuthService.signIn()'s internal timeout race, tearing down its
@@ -31,22 +32,40 @@ struct CRMSyncSettingsView: View {
                             .buttonStyle(.bordered)
                             .disabled(isWorking)
                     }
+                } else if isWorking {
+                    // Unmissable waiting state with a live countdown — the
+                    // lone tiny spinner read as "nothing happened".
+                    HStack(spacing: 8) {
+                        ProgressView().scaleEffect(0.7)
+                        TimelineView(.periodic(from: signInStartedAt ?? .now, by: 1)) { context in
+                            let remaining = max(
+                                0,
+                                AuthService.signInTimeoutSeconds
+                                    - Int(context.date.timeIntervalSince(signInStartedAt ?? context.date))
+                            )
+                            Text("Waiting for the browser sign-in… \(remaining)s")
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Cancel") { signInTask?.cancel() }
+                            .buttonStyle(.bordered)
+                    }
                 } else {
-                    HStack {
+                    HStack(spacing: 8) {
+                        Image(systemName: "circle.dashed")
+                            .foregroundStyle(.secondary)
+                        Text("Not signed in")
+                            .foregroundStyle(.secondary)
+                        Spacer()
                         Button("Sign in with Moon Five") { signIn() }
                             .buttonStyle(.borderedProminent)
-                            .disabled(isWorking)
-                        if isWorking {
-                            ProgressView().scaleEffect(0.7)
-                            Button("Cancel") { signInTask?.cancel() }
-                                .buttonStyle(.bordered)
-                        }
                     }
                 }
-                if let actionError {
+                if let actionError, !isWorking {
                     Text(actionError)
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 TextField("Owner Email", text: $config.ownerEmail, prompt: Text("you@example.com"))
@@ -125,6 +144,7 @@ struct CRMSyncSettingsView: View {
     private func signIn() {
         isWorking = true
         actionError = nil
+        signInStartedAt = Date()
         signInTask = Task {
             do {
                 try await AuthService.shared.signIn()

@@ -22,10 +22,17 @@ struct OIDCConfiguration {
 
     /// Verified deployment ground truth (2026-08-20): access.moonfive.tech
     /// does not resolve, and users-api.moonfive.tech's tokens still carry
-    /// the run.app `iss` — always authorize/refresh against the run.app
-    /// issuer directly, never an alias.
+    /// the run.app `iss` — so SERVERS must validate `iss` against the
+    /// run.app URL. This CLIENT never checks `iss`, which is what makes
+    /// the alias endpoint below safe (and necessary — see its comment).
     static let production = OIDCConfiguration(
-        issuer: URL(string: "https://user-access-api-production-537479330777.us-central1.run.app")!,
+        // The CUSTOM-DOMAIN alias, deliberately: some Moon Five networks
+        // filter `*.run.app` DNS (moonfive-insight), which silently kills
+        // the authorize redirect and the token POST on the raw Cloud Run
+        // URL. The alias serves /authorize and /token identically; tokens
+        // minted through it still carry the run.app `iss`, which only the
+        // SERVER validates — this client never checks `iss`.
+        issuer: URL(string: "https://users-api.moonfive.tech")!,
         clientID: "phonesync",
         redirectURIs: [47831, 47832, 47833],
         scope: "openid email profile"
@@ -494,7 +501,12 @@ actor AuthService {
     /// `signIn()` forever: each abandoned attempt would otherwise leak its
     /// bound loopback listener, exhausting `config.redirectURIs`'s three
     /// candidate ports after just a few tries.
-    private static let signInTimeoutNanoseconds: UInt64 = 180 * 1_000_000_000
+    // 5 minutes: a first-ever Google sign-in on a fresh Mac (password +
+    // 2FA + account picker) routinely blows through 3. The waiting UI now
+    // shows a live countdown, so a long window no longer looks like a hang.
+    static let signInTimeoutSeconds = 300
+    private static let signInTimeoutNanoseconds: UInt64 =
+        UInt64(signInTimeoutSeconds) * 1_000_000_000
 
     /// Runs one full interactive sign-in: PKCE + state, a one-shot loopback
     /// HTTP listener on the first bindable port of `config.redirectURIs`,

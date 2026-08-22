@@ -12,6 +12,7 @@ struct SetupView: View {
     @State private var signedInEmail: String?
     @State private var isSigningIn = false
     @State private var signInError: String?
+    @State private var signInStartedAt: Date?
     /// Handle to the in-flight sign-in Task so the Cancel button can call
     /// `.cancel()` on it — cancellation propagates through
     /// AuthService.signIn()'s internal timeout race, tearing down its
@@ -166,31 +167,40 @@ struct SetupView: View {
                         Text(signedInEmail.map { "Signed in as \($0)" } ?? "Signed in")
                             .foregroundStyle(.secondary)
                     }
+                } else if isSigningIn {
+                    // The waiting state must be UNMISSABLE: a labeled row
+                    // with a live countdown, not a lone tiny spinner —
+                    // "nothing happened" reports came from exactly that.
+                    HStack(spacing: 8) {
+                        ProgressView().scaleEffect(0.7)
+                        TimelineView(.periodic(from: signInStartedAt ?? .now, by: 1)) { context in
+                            let remaining = max(
+                                0,
+                                AuthService.signInTimeoutSeconds
+                                    - Int(context.date.timeIntervalSince(signInStartedAt ?? context.date))
+                            )
+                            Text("Waiting for the browser sign-in… \(remaining)s")
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("Cancel") { signInTask?.cancel() }
+                            .buttonStyle(.bordered)
+                    }
                 } else {
-                    HStack {
-                        Button {
-                            signIn()
-                        } label: {
-                            if isSigningIn {
-                                ProgressView().scaleEffect(0.7)
-                            } else {
-                                Text("Sign in with Moon Five")
-                            }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(isSigningIn)
-
-                        if isSigningIn {
-                            Button("Cancel") { signInTask?.cancel() }
-                                .buttonStyle(.bordered)
-                        }
+                    HStack(spacing: 8) {
+                        Image(systemName: "circle.dashed")
+                            .foregroundStyle(.secondary)
+                        Text("Not signed in")
+                            .foregroundStyle(.secondary)
+                        Button("Sign in with Moon Five") { signIn() }
+                            .buttonStyle(.borderedProminent)
                     }
+                }
 
-                    if let signInError {
-                        Text(signInError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
+                if let signInError, !isSignedIn, !isSigningIn {
+                    Text(signInError)
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -288,6 +298,7 @@ struct SetupView: View {
     private func signIn() {
         isSigningIn = true
         signInError = nil
+        signInStartedAt = Date()
         signInTask = Task {
             do {
                 try await AuthService.shared.signIn()
