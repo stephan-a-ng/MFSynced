@@ -1,13 +1,51 @@
 import XCTest
 @testable import MFSynced
 
+extension AuthService {
+    static func legacyCompatibilityFixture() -> AuthService {
+        AuthService(
+            tokenStore: InMemoryTokenStore(),
+            allowsLegacyCredentials: true
+        )
+    }
+}
+
+private actor StartGateState {
+    private(set) var started = false
+    private(set) var finished = false
+    func markStarted() { started = true }
+    func markFinished() { finished = true }
+}
+
 final class CRMSyncServiceTests: XCTestCase {
+    func testTrackedTaskStartGateBlocksWorkUntilRegistrationOpensIt() async {
+        let gate = TrackedTaskStartGate()
+        let state = StartGateState()
+        let task = Task {
+            await state.markStarted()
+            await gate.wait()
+            await state.markFinished()
+        }
+        while !(await state.started) { await Task.yield() }
+
+        let finishedBeforeOpen = await state.finished
+        XCTAssertFalse(finishedBeforeOpen)
+        gate.open()
+        await task.value
+        let finishedAfterOpen = await state.finished
+        XCTAssertTrue(finishedAfterOpen)
+    }
+
     func testQueueInboundOnlyForSyncedContacts() throws {
         var config = CRMConfig()
         config.syncedPhoneNumbers = ["+15551234567"]
         let tempPath = NSTemporaryDirectory() + "test_crm_\(UUID().uuidString).db"
         let queue = SyncQueueDatabase(path: tempPath)
-        let service = CRMSyncService(config: config, syncQueue: queue)
+        let service = CRMSyncService(
+            config: config,
+            syncQueue: queue,
+            authService: .legacyCompatibilityFixture()
+        )
 
         let synced = Message(
             id: 1, guid: "guid-1", text: "hello", attributedBody: nil,

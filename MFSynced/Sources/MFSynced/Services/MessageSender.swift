@@ -4,22 +4,8 @@ import OSLog
 private let senderLogger = Logger(subsystem: "tech.moonfive.MFSynced", category: "MessageSender")
 
 private func senderLog(_ message: String) {
+    guard SensitiveDiagnostics.record(message, bufferForFleet: false) else { return }
     senderLogger.info("\(message, privacy: .public)")
-    let path = NSHomeDirectory() + "/Library/Logs/mfsynced_crm.log"
-    let line = "\(Date()): \(message)\n"
-    guard let data = line.data(using: .utf8) else { return }
-    if FileManager.default.fileExists(atPath: path),
-       let handle = FileHandle(forWritingAtPath: path) {
-        handle.seekToEndOfFile()
-        handle.write(data)
-        handle.closeFile()
-    } else {
-        try? FileManager.default.createDirectory(
-            atPath: NSHomeDirectory() + "/Library/Logs",
-            withIntermediateDirectories: true
-        )
-        try? data.write(to: URL(fileURLWithPath: path))
-    }
 }
 
 enum MessageSender {

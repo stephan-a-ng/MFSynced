@@ -9,7 +9,10 @@ final class CRMSyncContactPushTests: XCTestCase {
         config.apiEndpoint = "http://127.0.0.1:1/v1/agent"
         config.apiKey = "test"
         config.syncedPhoneNumbers = synced
-        return CRMSyncService(config: config)
+        return CRMSyncService(
+            config: config,
+            authService: .legacyCompatibilityFixture()
+        )
     }
 
     func testUnresolvedContactIsRetriedNextPoll() async {

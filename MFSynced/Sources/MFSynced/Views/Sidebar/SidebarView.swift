@@ -124,8 +124,8 @@ struct SidebarView: View {
                         crmConfig: appState.crmConfig,
                         onSelect: { appState.selectConversation(conversation) },
                         onToggleCRMSync: { appState.toggleCRMSync(for: conversation) },
-                        onSyncHistory: { Task { await appState.syncHistoryToCRM(for: conversation) } },
-                        onForwardSuccess: { Task { await appState.enableCRMSyncIfNeeded(for: conversation) } }
+                        onSyncHistory: { appState.syncHistoryToCRM(for: conversation) },
+                        onForwardSuccess: { appState.enableCRMSyncIfNeeded(for: conversation) }
                     )
                 }
             }

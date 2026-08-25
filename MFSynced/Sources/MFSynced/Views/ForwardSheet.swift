@@ -137,8 +137,8 @@ struct ForwardSheet: View {
 
     /// Every network call below routes through the shared auth/endpoint
     /// resolution (`AuthService.shared.authorizationHeaderValue(for:)`):
-    /// a signed-in OIDC (OpenID Connect) Bearer token for ANY target, or that target's own
-    /// legacy key while signed out — never another target's key. This is
+    /// a validated OIDC (OpenID Connect) Bearer token for ANY target. The
+    /// production shared auth service never falls back while signed out. This is
     /// the SAME resolution CRMSyncService's pushInbound/syncHistory use, so
     /// team-forward never falls back to a raw `config.apiKey` the way the
     /// pre-OIDC version of this view did (which meant a signed-in,

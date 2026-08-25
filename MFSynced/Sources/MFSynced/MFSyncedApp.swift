@@ -21,7 +21,13 @@ struct MFSyncedApp: App {
         .defaultSize(width: 900, height: 600)
 
         Settings {
-            SettingsView(appState: appState)
+            switch AuthenticatedContentMode.resolve(for: appState.authentication.state) {
+            case .authenticationOnly:
+                AuthenticationGateView(authentication: appState.authentication)
+                    .frame(width: 520, height: 420)
+            case .sensitiveApplication:
+                SettingsView(appState: appState)
+            }
         }
     }
 }

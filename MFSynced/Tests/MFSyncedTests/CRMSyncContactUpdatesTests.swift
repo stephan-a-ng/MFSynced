@@ -133,7 +133,11 @@ final class CRMSyncContactUpdatesTests: XCTestCase {
         // Fast-fail endpoint: connection refused immediately, no network wait.
         config.apiEndpoint = "http://127.0.0.1:1/v1/agent"
         config.apiKey = "test"
-        return CRMSyncService(config: config, syncQueue: syncQueue)
+        return CRMSyncService(
+            config: config,
+            syncQueue: syncQueue,
+            authService: .legacyCompatibilityFixture()
+        )
     }
 
     func testPullContactUpdatesNoOpWithoutApplier() async {
@@ -142,6 +146,7 @@ final class CRMSyncContactUpdatesTests: XCTestCase {
         await service.pullContactUpdates()
     }
 
+    @MainActor
     func testPullContactUpdatesApplierCalledOncePerUpdate() async {
         let syncQueue = SyncQueueDatabase(path: NSTemporaryDirectory() + "test_cu_\(UUID().uuidString).db")
         let service = makeService(syncQueue: syncQueue)
