@@ -98,6 +98,9 @@ enum AuthURLBuilder {
             URLQueryItem(name: "code_challenge", value: codeChallenge),
             URLQueryItem(name: "code_challenge_method", value: "S256"),
             URLQueryItem(name: "scope", value: config.scope),
+            // An explicit app sign-in must remain interactive even when the
+            // User Access browser still has a live cookie from another user.
+            URLQueryItem(name: "prompt", value: "select_account"),
         ]
         return components.url!
     }
@@ -420,6 +423,11 @@ private final class CallbackCompletion: @unchecked Sendable {
 // MARK: - AuthService
 
 actor AuthService: AuthSessionClient {
+    /// Keep refreshes inside CRM's ten-second liveness deadline. URLSession
+    /// cancellation is cooperative, so the request itself must also be
+    /// bounded when a heartbeat joins the single-flight refresh.
+    static let refreshRequestTimeoutSeconds: TimeInterval = 8
+
     enum AuthError: Error, LocalizedError {
         case signedOut
         case noBindablePort(detail: String)
@@ -576,6 +584,7 @@ actor AuthService: AuthSessionClient {
         let currentRefreshToken = currentTokenSet.refreshToken
         var request = URLRequest(url: config.issuer.appendingPathComponent("token"))
         request.httpMethod = "POST"
+        request.timeoutInterval = Self.refreshRequestTimeoutSeconds
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.httpBody = Self.formEncode([
             "grant_type": "refresh_token",

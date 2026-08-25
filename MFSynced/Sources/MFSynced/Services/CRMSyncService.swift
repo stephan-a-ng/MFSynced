@@ -259,19 +259,10 @@ final class CRMSyncService {
     var selfHandleProvider: (@Sendable () -> String?)?
     /// `currentSendHandle()`'s cache — in-memory only, same rationale as
     /// `lastCatalogUploadAt`/`lastCatalogFingerprint`: a relaunch
-    /// re-querying is fine and intended. UNLIKE most of this class's other
-    /// poll-gating vars, this pair IS lock-protected (`sendHandleLock`):
-    /// `poll()` is NOT actually serialized end-to-end despite
-    /// `pollInFlight` — `ControlServer.handlePoll()` calls
-    /// `syncService.poll()` directly from its own `Task` for its
-    /// localhost e2e-testing control API, with no `pollInFlight` check at
-    /// all, so a timer-driven `poll()` and a ControlServer-driven one can
-    /// run concurrently against the same instance and both reach
-    /// `sendHeartbeat()` at once. (That gap pre-exists this change and
-    /// also affects `lastCatalogUploadAt`/`lastContactUpdatesPollAt` —
-    /// out of scope here, but not repeated for this new state.) Internal
-    /// for test visibility; mutate only through `currentSendHandle()` so
-    /// the lock is never bypassed.
+    /// re-querying is fine and intended. This pair remains lock-protected
+    /// (`sendHandleLock`) so direct test calls and a restarting heartbeat
+    /// loop cannot publish torn cache state. Internal for test visibility;
+    /// mutate only through `currentSendHandle()`.
     var cachedSendHandle: String?
     var lastSendHandleQueryAt: TimeInterval?
     /// Overridable by tests, same rationale as `catalogMinIntervalSeconds`.
@@ -307,6 +298,15 @@ final class CRMSyncService {
     private var pollTimer: Timer?
     private let taskLock = NSLock()
     private var pollTask: Task<Void, Never>?
+    private var heartbeatTask: Task<Void, Never>?
+    private var retiringHeartbeatTask: Task<Void, Never>?
+    /// Test seams for the dedicated liveness loop. Production leaves both
+    /// nil and uses sendHeartbeat plus Task.sleep.
+    var heartbeatAttemptOverride: (@Sendable () async -> Void)?
+    var heartbeatSleepOverride: (@Sendable (UInt64) async throws -> Void)?
+    var heartbeatTimeoutSleepOverride: (@Sendable (UInt64) async throws -> Void)?
+    var heartbeatIntervalNanoseconds: UInt64 = 15_000_000_000
+    var heartbeatTimeoutNanoseconds: UInt64 = 10_000_000_000
     /// All work intentionally detached from the serial poll (delivery
     /// receipt checks and gate-triggered history backfills). Registration
     /// and stop use the same lock so nothing can escape sign-out cleanup.
@@ -314,13 +314,14 @@ final class CRMSyncService {
     private var stopped = false
     /// Main-thread only (timer closure + main-actor reset).
     private var pollInFlight = false
-    /// Best-effort re-entrancy guard for uploadStaged() — NOT a mutex, and
-    /// unlike pollInFlight it isn't actually needed for correctness today:
-    /// poll() is the sole caller, and poll() is itself already serialized by
-    /// pollInFlight, so two uploadStaged() calls can never overlap in
-    /// practice. This only protects against a future direct call racing an
-    /// in-flight one. No lock — same plain-Bool style as its siblings.
+    /// Staging has a second caller through ControlServer's localhost /poll
+    /// endpoint, so the timer and control paths can reach uploadStaged at the
+    /// same time. The guard and rotation cursor share this lock: one caller
+    /// reserves the staging pass, and only actual incremental probes advance
+    /// the per-agent cursor.
+    private let stagedStateLock = NSLock()
     private var stagedUploadInFlight = false
+    private var stagedRotationAfterByAgentID: [String: String] = [:]
     private let session = URLSession.shared
     /// App-process start, for the heartbeat's uptime_seconds.
     private let launchedAt = Date()
@@ -390,6 +391,82 @@ final class CRMSyncService {
         configLock.unlock()
     }
 
+    /// Starts one serial liveness loop, independent of the potentially slow
+    /// sync poll. Repeated starts reuse the active loop; after a stop, a new
+    /// loop waits for its retiring predecessor before sending immediately.
+    /// Subsequent attempts are fifteen seconds apart, so attempts never overlap.
+    func startHeartbeatLoop() {
+        let startGate = TrackedTaskStartGate()
+        taskLock.lock()
+        guard heartbeatTask == nil else {
+            taskLock.unlock()
+            return
+        }
+        let predecessor = retiringHeartbeatTask
+        let task = Task { [weak self] in
+            await startGate.wait()
+            // stopPolling is synchronous, so a rapid stop/start can arrive
+            // before cooperative URLSession cancellation finishes. Wait for
+            // that retiring loop before the new immediate attempt.
+            if let predecessor { await predecessor.value }
+            guard let self else { return }
+            while !Task.isCancelled, !self.isStopped {
+                await self.runHeartbeatAttemptWithDeadline()
+                guard !Task.isCancelled, !self.isStopped else { return }
+                do {
+                    if let sleep = self.heartbeatSleepOverride {
+                        try await sleep(self.heartbeatIntervalNanoseconds)
+                    } else {
+                        try await Task.sleep(nanoseconds: self.heartbeatIntervalNanoseconds)
+                    }
+                } catch {
+                    return
+                }
+            }
+        }
+        heartbeatTask = task
+        retiringHeartbeatTask = nil
+        taskLock.unlock()
+        startGate.open()
+    }
+
+    /// Bounds the complete liveness attempt, including token refresh before
+    /// URLRequest creation. URLSession cancellation is cooperative, and the
+    /// request itself also carries a shorter transport timeout below.
+    private func runHeartbeatAttemptWithDeadline() async {
+        let timeout = heartbeatTimeoutNanoseconds
+        let attempt = heartbeatAttemptOverride
+        let completedBeforeDeadline = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { [weak self] in
+                guard let self else { return true }
+                if let attempt {
+                    await attempt()
+                } else {
+                    await self.sendHeartbeat()
+                }
+                return true
+            }
+            group.addTask {
+                do {
+                    if let sleep = self.heartbeatTimeoutSleepOverride {
+                        try await sleep(timeout)
+                    } else {
+                        try await Task.sleep(nanoseconds: timeout)
+                    }
+                    return false
+                } catch {
+                    return true
+                }
+            }
+            let first = await group.next() ?? true
+            group.cancelAll()
+            return first
+        }
+        if !completedBeforeDeadline, !Task.isCancelled {
+            crmLog("[CRM] heartbeat timed out")
+        }
+    }
+
     func startPolling() {
         // `stopped` blocks every tracked background operation, including a
         // user-requested history sync. Clear it before the automatic-polling
@@ -406,6 +483,7 @@ final class CRMSyncService {
             crmLog("[CRM] startPolling: skipped — isEnabled=\(config.isEnabled) endpoint='\(agentEndpoint)'")
             return
         }
+        startHeartbeatLoop()
         crmLog("[CRM] startPolling: starting timer every \(config.pollIntervalSeconds)s → \(agentEndpoint)")
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: config.pollIntervalSeconds, repeats: true) { [weak self] _ in
@@ -438,10 +516,16 @@ final class CRMSyncService {
         stopped = true
         let pollTask = self.pollTask
         self.pollTask = nil
+        let heartbeatTask = self.heartbeatTask
+        self.heartbeatTask = nil
+        if let heartbeatTask {
+            retiringHeartbeatTask = heartbeatTask
+        }
         let backgroundTasks = Array(self.backgroundTasks.values)
         self.backgroundTasks.removeAll()
         taskLock.unlock()
         pollTask?.cancel()
+        heartbeatTask?.cancel()
         backgroundTasks.forEach { $0.cancel() }
     }
 
@@ -474,7 +558,10 @@ final class CRMSyncService {
         guard !Task.isCancelled, !isStopped else { return }
         await pullContactUpdates()
         guard !Task.isCancelled, !isStopped else { return }
-        await sendHeartbeat()
+        // Keep the optional send-handle cache warm on the ordinary sync path.
+        // Its sqlite scan is intentionally excluded from the liveness task,
+        // where a locked/cold chat.db could otherwise defeat the deadline.
+        _ = await currentSendHandle()
         guard !Task.isCancelled, !isStopped else { return }
         await pushInbound()
         guard !Task.isCancelled, !isStopped else { return }
@@ -798,10 +885,9 @@ final class CRMSyncService {
 
     /// Fleet telemetry for the nexus (POST {apiEndpoint}/heartbeat).
     ///
-    /// Fire-and-forget on purpose: a heartbeat must never block or fail
-    /// message sync, and an old backend that 404s the route costs nothing.
-    /// Every field is optional on the wire; the server samples what it
-    /// forwards to the datalake, so sending each poll tick is fine.
+    /// Called only by the dedicated serial liveness loop, never by poll(),
+    /// so slow catalog/staging work cannot make a running Mac appear DOWN.
+    /// Every field is optional on the wire; an old backend may safely 404.
     /// Builds the heartbeat JSON body from config + live process values.
     /// Pure and static on purpose: sendHeartbeat() supplies the real
     /// hostname/uptime/etc, tests supply fixed values and assert on the
@@ -852,11 +938,8 @@ final class CRMSyncService {
     /// every re-query, including a nil result, so a chat.db read error
     /// doesn't turn into a retry-every-tick loop.
     ///
-    /// Lock-protected (`sendHandleLock`), NOT relying on `poll()`
-    /// serialization: `ControlServer`'s localhost `/poll` endpoint can call
-    /// `syncService.poll()` (→ `sendHeartbeat()` → this method) concurrently
-    /// with the timer-driven poll — see the doc comment on
-    /// `cachedSendHandle`. The provider itself runs OUTSIDE the lock: it
+    /// Lock-protected (`sendHandleLock`) rather than relying on task
+    /// serialization. The provider itself runs OUTSIDE the lock: it
     /// opens its own sqlite connection per call (`ChatDatabase.selfHandle()`
     /// makes no shared-state assumption), so a concurrent provider call from
     /// a losing thread is redundant work, not a correctness problem — only
@@ -891,6 +974,10 @@ final class CRMSyncService {
         return result
     }
 
+    private func cachedSendHandleSnapshot() -> String? {
+        sendHandleLock.withLock { cachedSendHandle }
+    }
+
     func sendHeartbeat() async {
         guard let url = URL(string: "\(agentEndpoint)/heartbeat") else { return }
         guard let authorization = await authorizationHeaderValue() else { return }
@@ -900,10 +987,11 @@ final class CRMSyncService {
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             uptimeSeconds: Int(Date().timeIntervalSince(launchedAt)),
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-            sendHandle: await currentSendHandle()
+            sendHandle: cachedSendHandleSnapshot()
         )
         let bodyData = try? JSONSerialization.data(withJSONObject: body)
-        let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
+        var request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
+        request.timeoutInterval = 8
         do {
             let (_, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
@@ -1223,6 +1311,12 @@ final class CRMSyncService {
     /// one POST per poll tick and the wire caps a POST at 200 rows.
     static let stagedBatchLimit = 200
 
+    /// Hard cap on chat.db queries per staging pass. A large quiet catalog
+    /// otherwise turns a nominal five-second poll into minutes of thousands
+    /// of zero-row probes, starving every later operation in that poll.
+    static let stagedQueryBudget = 40
+    static let stagedIncrementalQueryReserve = 5
+
     /// One wire-ready staged message row. `rowID` is bookkeeping only (chat.db
     /// ROWID, for cursor advancement) — it is never sent on the wire, only
     /// the guid identifies a row to the server.
@@ -1265,7 +1359,7 @@ final class CRMSyncService {
     /// — decided purely from cursor presence/state (no cursor row ⇒ initial
     /// backfill; cursor row with backfillDone == false ⇒ continue backfill
     /// from where it left off; cursor row with backfillDone == true ⇒
-    /// incremental) and a shared `budget` spent in `chats` order. Gated
+    /// incremental) and shared row/query budgets. Gated
     /// (already-live-synced) chats are excluded entirely: their content
     /// already flows through pushInbound, so staging it too would be
     /// redundant.
@@ -1277,52 +1371,87 @@ final class CRMSyncService {
     /// cursor.backfilledCount`. Capping either way means the budget spent on
     /// a chat reflects what will actually come back, letting a second chat
     /// pick up the leftover in the same tick — e.g. two 150-message chats
-    /// against a 200 budget split 150/50, not 200/0. An incremental chat's
-    /// true row count isn't cheaply knowable ahead of the fetch, so it
-    /// conservatively claims the rest of the tick's budget; any budget it
-    /// doesn't actually use is simply picked up again next tick (fairness
-    /// across ticks is fine — see the module doc).
+    /// against a 200 budget split 150/50, not 200/0. Backfills are planned
+    /// before incremental probes so new catalog coverage is never crowded
+    /// out by quiet chats. Incremental candidates are sorted by stable chat
+    /// identifier and rotated after the last chat actually probed on the
+    /// previous pass, remaining fair across catalog reordering and churn.
     static func stagedRowsPlan(
         chats: [ChatCatalogEntry],
         cursors: [String: StagedCursor],
         gated: Set<String>,
-        budget: Int
+        budget: Int,
+        queryBudget: Int = stagedQueryBudget,
+        rotationAfter: String? = nil
     ) -> [StagedFetchPlan] {
+        guard budget > 0, queryBudget > 0 else { return [] }
         var plans: [StagedFetchPlan] = []
         var remaining = budget
-        for chat in chats {
-            guard remaining > 0 else { break }
-            guard !gated.contains(chat.chatIdentifier) else { continue }
+        let eligible = chats.filter { !gated.contains($0.chatIdentifier) }
+        let incremental = eligible
+            .filter { cursors[$0.chatIdentifier]?.backfillDone == true }
+            .sorted { $0.chatIdentifier < $1.chatIdentifier }
+        let hasUnfinishedBackfill = eligible.contains {
+            cursors[$0.chatIdentifier]?.backfillDone != true && $0.messageCount > 0
+        }
+        let reservedIncrementalQueries: Int
+        if incremental.isEmpty {
+            reservedIncrementalQueries = 0
+        } else if hasUnfinishedBackfill {
+            // Always leave at least one query for a backfill when both tiers
+            // exist, and reserve up to five for already-covered chats.
+            reservedIncrementalQueries = min(
+                stagedIncrementalQueryReserve,
+                max(0, queryBudget - 1)
+            )
+        } else {
+            reservedIncrementalQueries = queryBudget
+        }
+        var remainingBackfillQueries = queryBudget - reservedIncrementalQueries
+
+        // Tier 1: unfinished backfills consume both their known row count
+        // and one query slot.
+        for chat in eligible {
+            guard remaining > 0, remainingBackfillQueries > 0 else { break }
             if let cursor = cursors[chat.chatIdentifier] {
-                if cursor.backfillDone {
-                    // Incremental probes do NOT consume plan budget: a done,
-                    // quiet chat fetches zero rows, and charging it the
-                    // remaining budget starved every later chat forever
-                    // (observed live: 2 of 1518 chats processed, then a
-                    // permanent zero-row tick loop). The real row budget is
-                    // enforced at POST assembly — rows beyond the batch cap
-                    // are dropped unsent, stay unconfirmed, and re-offer
-                    // next tick.
-                    plans.append(StagedFetchPlan(
-                        chatIdentifier: chat.chatIdentifier,
-                        mode: .incremental(afterRowID: cursor.lastRowID, limit: stagedBatchLimit)
-                    ))
-                } else {
-                    let windowRemaining = max(0, stagedBackfillWindow - cursor.backfilledCount)
-                    let limit = min(remaining, windowRemaining)
-                    guard limit > 0 else { continue }
-                    plans.append(StagedFetchPlan(
-                        chatIdentifier: chat.chatIdentifier,
-                        mode: .continueBackfill(beforeRowID: cursor.oldestRowID, limit: limit)
-                    ))
-                    remaining -= limit
-                }
+                guard !cursor.backfillDone else { continue }
+                let windowRemaining = max(0, stagedBackfillWindow - cursor.backfilledCount)
+                let limit = min(remaining, windowRemaining)
+                guard limit > 0 else { continue }
+                plans.append(StagedFetchPlan(
+                    chatIdentifier: chat.chatIdentifier,
+                    mode: .continueBackfill(beforeRowID: cursor.oldestRowID, limit: limit)
+                ))
+                remaining -= limit
             } else {
                 let limit = min(stagedBackfillWindow, remaining, chat.messageCount)
                 guard limit > 0 else { continue }
                 plans.append(StagedFetchPlan(chatIdentifier: chat.chatIdentifier, mode: .backfill(limit: limit)))
                 remaining -= limit
             }
+            remainingBackfillQueries -= 1
+        }
+
+        // Tier 2: incremental probes spend query slots, while the actual
+        // rows they yield remain bounded during POST assembly. They are
+        // still planned when tier 1 claims the full row budget; uploadStaged
+        // executes these probes first so quiet chats cost no row capacity.
+        let remainingQueries = queryBudget - plans.count
+        guard remainingQueries > 0, !incremental.isEmpty else { return plans }
+        let startIndex: Int
+        if let rotationAfter,
+           let next = incremental.firstIndex(where: { $0.chatIdentifier > rotationAfter }) {
+            startIndex = next
+        } else {
+            startIndex = 0
+        }
+        let rotated = Array(incremental[startIndex...]) + Array(incremental[..<startIndex])
+        for chat in rotated.prefix(remainingQueries) {
+            guard let cursor = cursors[chat.chatIdentifier] else { continue }
+            plans.append(StagedFetchPlan(
+                chatIdentifier: chat.chatIdentifier,
+                mode: .incremental(afterRowID: cursor.lastRowID, limit: stagedBatchLimit)
+            ))
         }
         return plans
     }
@@ -1479,9 +1608,16 @@ final class CRMSyncService {
     /// newest-`stagedBackfillWindow` target) is marked done immediately,
     /// independent of the POST outcome — there is nothing to confirm for it.
     func uploadStaged() async {
-        guard !stagedUploadInFlight else { return }
-        stagedUploadInFlight = true
-        defer { stagedUploadInFlight = false }
+        let configSnapshot = config
+        let reservation: (started: Bool, rotationAfter: String?) = stagedStateLock.withLock {
+            guard !stagedUploadInFlight else { return (false, nil) }
+            stagedUploadInFlight = true
+            return (true, stagedRotationAfterByAgentID[configSnapshot.agentID])
+        }
+        guard reservation.started else { return }
+        defer {
+            stagedStateLock.withLock { stagedUploadInFlight = false }
+        }
 
         guard let catalogProvider = catalogChatsProvider,
               let messagesProvider = stagedMessagesProvider else { return }
@@ -1491,14 +1627,27 @@ final class CRMSyncService {
         let plan = Self.stagedRowsPlan(
             chats: chats,
             cursors: cursors,
-            gated: config.syncedPhoneNumbers,
-            budget: Self.stagedBatchLimit
+            gated: configSnapshot.syncedPhoneNumbers,
+            budget: Self.stagedBatchLimit,
+            queryBudget: Self.stagedQueryBudget,
+            rotationAfter: reservation.rotationAfter
         )
         guard !plan.isEmpty else { return }
 
         var allRows: [StagedMessageRow] = []
         var exhaustedChats: Set<String> = []
-        for entry in plan {
+        // Probe incrementals first so a full 200-row backfill cannot suppress
+        // them. The returned plan remains backfill-first for prioritization
+        // and cursor semantics; execution order only decides which actual
+        // rows claim the one-POST wire budget.
+        let executionPlan = plan.filter {
+            if case .incremental = $0.mode { return true }
+            return false
+        } + plan.filter {
+            if case .incremental = $0.mode { return false }
+            return true
+        }
+        for entry in executionPlan {
             guard !Task.isCancelled, !isStopped else { return }
             // The POST-side row budget: incremental plan entries are
             // budget-free probes, so the total is enforced here instead.
@@ -1512,6 +1661,15 @@ final class CRMSyncService {
             }
             let rows = Self.stagedRows(chatIdentifier: entry.chatIdentifier, messages: messages)
             let room = Self.stagedBatchLimit - allRows.count
+            if case .incremental = entry.mode, rows.count <= room {
+                // Advance on a complete chat.db probe, not on POST success.
+                // Quiet/fitting chats yield their place immediately. A chat
+                // truncated by the shared wire cap remains next so its
+                // omitted rows do not wait for a full catalog rotation.
+                stagedStateLock.withLock {
+                    stagedRotationAfterByAgentID[configSnapshot.agentID] = entry.chatIdentifier
+                }
+            }
             allRows.append(contentsOf: rows.prefix(room))
         }
 
