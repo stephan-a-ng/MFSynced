@@ -1,6 +1,23 @@
 import XCTest
 @testable import MFSynced
 
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    var current: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
 final class CRMSyncCatalogTests: XCTestCase {
 
     // MARK: - catalogBody (pure body-builder, mirrors S1's heartbeatBody)
@@ -192,7 +209,10 @@ final class CRMSyncCatalogTests: XCTestCase {
         // Fast-fail endpoint: connection refused immediately, no network wait.
         config.apiEndpoint = "http://127.0.0.1:1/v1/agent"
         config.apiKey = "test"
-        return CRMSyncService(config: config)
+        return CRMSyncService(
+            config: config,
+            authService: .legacyCompatibilityFixture()
+        )
     }
 
     func testUploadCatalogTouchesGateEvenOnFailureButNotSuccessState() async {
@@ -234,5 +254,47 @@ final class CRMSyncCatalogTests: XCTestCase {
         // minInterval, so the gate timestamp must not move.
         await service.uploadCatalog()
         XCTAssertEqual(service.lastCatalogUploadAt, firstAttempt)
+    }
+
+    func testUnchangedCatalogScanAdvancesAttemptGate() async {
+        let service = makeService()
+        service.catalogMinIntervalSeconds = 60
+        service.catalogFloorIntervalSeconds = 600
+        let chat = ChatCatalogEntry(
+            chatIdentifier: "+15551234567",
+            displayName: "Vince",
+            lastActivityAt: Date(timeIntervalSince1970: 1_700_000_000),
+            messageCount: 3
+        )
+        let providerCallCount = LockedCounter()
+        service.catalogChatsProvider = {
+            providerCallCount.increment()
+            return [chat]
+        }
+
+        let input = CRMSyncService.CatalogChatInput(
+            chatIdentifier: chat.chatIdentifier,
+            displayName: chat.displayName ?? chat.chatIdentifier,
+            contactName: nil,
+            photoJPEG: nil,
+            lastActivityAt: chat.lastActivityAt,
+            messageCount: chat.messageCount
+        )
+        let now = ProcessInfo.processInfo.systemUptime
+        service.lastCatalogUploadAt = now - 61
+        service.lastCatalogFingerprint = CRMSyncService.catalogFingerprint(chats: [input])
+        service.lastCatalogSuccessAt = now - 1
+
+        await service.uploadCatalog()
+        let skippedAttempt = service.lastCatalogUploadAt
+        XCTAssertEqual(providerCallCount.current, 1)
+        XCTAssertNotNil(skippedAttempt)
+
+        // The first unchanged scan advances the attempt timestamp, so the
+        // next poll tick stays behind the cheap time gate and never repeats
+        // the database/contact-enrichment pass.
+        await service.uploadCatalog()
+        XCTAssertEqual(providerCallCount.current, 1)
+        XCTAssertEqual(service.lastCatalogUploadAt, skippedAttempt)
     }
 }

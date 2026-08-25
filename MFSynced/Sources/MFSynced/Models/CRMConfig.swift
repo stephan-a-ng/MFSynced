@@ -39,10 +39,9 @@ struct CRMConfig: Codable {
     /// `CRMSyncService.agentEndpoint`) — a fresh sign-in-only install never
     /// populates this field at all.
     var apiEndpoint: String = ""
-    /// Legacy per-agent API key. Kept decodable and usable as a fallback
-    /// ONLY while signed out of OIDC, so an already-installed agent keeps
-    /// working through the migration without forcing an immediate
-    /// re-sign-in (see `CRMSyncService.authorizationHeaderValue`).
+    /// Legacy per-agent API key. Kept decodable for migration and isolated
+    /// compatibility tooling only. The production UI and shared AuthService
+    /// require OIDC and never use this while signed out.
     var apiKey: String = ""
     var pollIntervalSeconds: Double = 5.0
     var syncedPhoneNumbers: Set<String> = []

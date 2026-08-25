@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 @Observable
 final class AppState {
     var conversations: [Conversation] = []
@@ -10,20 +11,44 @@ final class AppState {
     var isSearching: Bool = false
     var crmConfig: CRMConfig
     var dbError: String? = nil
+    let authentication: AuthenticationController
 
     private var chatDB: ChatDatabase
     private var lastSeenRowID: Int64 = 0
     private var pollTimer: Timer?
     private var crmService: CRMSyncService?
     private var controlServer: ControlServer?
+    private var isPollingStarted = false
+    private let logsDirectory: URL
     let contactStore = ContactStore()
 
     init() {
         self.crmConfig = CRMConfig.load()
         self.chatDB = ChatDatabase()
+        self.authentication = AuthenticationController()
+        self.logsDirectory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs", isDirectory: true)
+        SensitiveDiagnostics.configure(logsDirectory: logsDirectory)
+        clearLegacySensitiveDiagnostics()
+    }
+
+    init(authentication: AuthenticationController, logsDirectory: URL) {
+        self.crmConfig = CRMConfig.load()
+        self.chatDB = ChatDatabase()
+        self.authentication = authentication
+        self.logsDirectory = logsDirectory
+        SensitiveDiagnostics.configure(logsDirectory: logsDirectory)
+        clearLegacySensitiveDiagnostics()
     }
 
     func startPolling(interval: TimeInterval = 2.0) {
+        guard authentication.state.allowsSensitiveContent else {
+            lockForAuthentication()
+            return
+        }
+        SensitiveDiagnostics.setEnabled(true)
+        guard !isPollingStarted else { return }
+        isPollingStarted = true
         loadConversations()
         do {
             lastSeenRowID = try chatDB.getMaxRowID()
@@ -35,11 +60,15 @@ final class AppState {
         // instance, so sign-in/out from the Setup/Settings UI takes effect
         // here immediately without an app relaunch.
         crmService = CRMSyncService(config: crmConfig, authService: AuthService.shared)
+        // ChatDatabase has immutable configuration and opens a fresh
+        // read-only SQLite connection per call, so these queries stay off
+        // the main actor without sharing a sqlite handle.
+        let database = chatDB
         // Outbound service routing: prefer the service the chat already lives
         // on (SMS threads -> the SMS-forwarding account, so Android
         // recipients get the text immediately instead of a stuck iMessage).
-        crmService?.chatServiceHint = { [weak self] phone in
-            self?.chatDB.serviceForChat(identifier: phone)
+        crmService?.chatServiceHint = { phone in
+            database.serviceForChat(identifier: phone)
         }
         crmService?.contactInfoProvider = { [weak self] phone in
             self?.contactStore.contactInfo(for: phone) ?? (nil, nil)
@@ -53,47 +82,46 @@ final class AppState {
             ) ?? false
         }
         // Candidate catalog upload: every 1:1 conversation, metadata only.
-        crmService?.catalogChatsProvider = { [weak self] in
-            try self?.chatDB.fetchCatalog() ?? []
+        crmService?.catalogChatsProvider = {
+            try database.fetchCatalog()
         }
         // Staged content upload: per-chat backfill (no cursor yet),
         // backfill-continuation (in-progress cursor), or incremental
         // (backfill-done cursor) fetch, driven by CRMSyncService.
         // stagedRowsPlan.
-        crmService?.stagedMessagesProvider = { [weak self] chatIdentifier, mode in
-            guard let self else { return [] }
+        crmService?.stagedMessagesProvider = { chatIdentifier, mode in
             switch mode {
             case .backfill(let limit):
-                return try self.chatDB.fetchMessages(forChat: chatIdentifier, limit: limit)
+                return try database.fetchMessages(forChat: chatIdentifier, limit: limit)
             case .continueBackfill(let beforeRowID, let limit):
-                return try self.chatDB.fetchMessages(forChat: chatIdentifier, limit: limit, beforeRowID: beforeRowID)
+                return try database.fetchMessages(forChat: chatIdentifier, limit: limit, beforeRowID: beforeRowID)
             case .incremental(let afterRowID, let limit):
-                return try self.chatDB.fetchMessages(forChat: chatIdentifier, afterRowID: afterRowID, limit: limit)
+                return try database.fetchMessages(forChat: chatIdentifier, afterRowID: afterRowID, limit: limit)
             }
         }
-        crmService?.chatMaxRowID = { [weak self] in
-            (try? self?.chatDB.getMaxRowID()) ?? 0
+        crmService?.chatMaxRowID = {
+            (try? database.getMaxRowID()) ?? 0
         }
         // Heartbeat's send_handle: the phone number/handle this Mac sends
         // iMessages as, so the console can show who the agent is really
         // syncing for.
-        crmService?.selfHandleProvider = { [weak self] in
-            self?.chatDB.selfHandle()
+        crmService?.selfHandleProvider = {
+            database.selfHandle()
         }
-        crmService?.deliveryProbe = { [weak self] phone, afterRowID in
-            self?.chatDB.outgoingDeliveryState(identifier: phone, afterRowID: afterRowID)
+        crmService?.deliveryProbe = { phone, afterRowID in
+            database.outgoingDeliveryState(identifier: phone, afterRowID: afterRowID)
         }
         // Completeness backstop: when the server-desired gate gains a
         // number (a conversation just shared in the console), pullGate()
         // fires this once per newly-added identifier so its full history
         // backfills the same way the sidebar's "Sync History" action and
         // the forward-to-teammate flow do — beyond the ~2000 staged rows
-        // the server already promoted. Fire-and-forget: syncHistory is
-        // async, so this hop into a detached Task is required since
-        // historyBackfillRequest itself is a synchronous trigger.
+        // the server already promoted. CRMSyncService launches this callback
+        // in its tracked background-task registry, keeping the poll moving
+        // while ensuring sign-out cancels the backfill.
         crmService?.historyBackfillRequest = { [weak self] chatIdentifier in
             guard let self else { return }
-            Task { await self.syncHistoryToCRM(forChatIdentifier: chatIdentifier) }
+            self.syncHistoryToCRM(forChatIdentifier: chatIdentifier)
         }
         // The service owns the gate now (server-desired allowlist): every
         // change it applies — a gate pull, a server-routed add, the rollback
@@ -124,42 +152,47 @@ final class AppState {
 
         pollTimer?.invalidate()
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            self?.pollForNewMessages()
+            Task { @MainActor [weak self] in self?.pollForNewMessages() }
         }
 
-        // Diagnostic: dump the +12039185024 thread immediately on startup
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.dumpThreadDiagnostic(chatIdentifier: "+12039185024")
-        }
-    }
-
-    private func dumpThreadDiagnostic(chatIdentifier: String) {
-        do {
-            let msgs = try chatDB.fetchMessages(forChat: chatIdentifier, limit: 50)
-            appLog("[diag] \(chatIdentifier) → \(msgs.count) messages")
-            let iso = ISO8601DateFormatter()
-            let lines = msgs.map { m -> String in
-                let ts = iso.string(from: m.date)
-                let dir = m.isFromMe ? "me  " : "them"
-                return "[\(ts)][\(dir)] \(m.displayText ?? "(nil)")"
-            }
-            let dump = "Thread: \(chatIdentifier) (\(msgs.count) msgs)\n" + lines.joined(separator: "\n") + "\n"
-            let dumpPath = NSHomeDirectory() + "/Library/Logs/mfsynced_messages.txt"
-            if let data = dump.data(using: .utf8) {
-                if let handle = FileHandle(forWritingAtPath: dumpPath) {
-                    handle.truncateFile(atOffset: 0); handle.write(data); handle.closeFile()
-                } else { try? data.write(to: URL(fileURLWithPath: dumpPath)) }
-            }
-            appLog("[diag] dump written to mfsynced_messages.txt")
-        } catch {
-            appLog("[diag] ERROR: \(error)")
-        }
     }
 
     func stopPolling() {
+        isPollingStarted = false
         pollTimer?.invalidate()
         pollTimer = nil
         crmService?.stopPolling()
+        controlServer?.stop()
+        controlServer = nil
+        crmService = nil
+    }
+
+    /// Immediately removes every piece of previously rendered message/sync
+    /// state when authentication is absent or uncertain. ContentView also
+    /// removes the entire application subtree, so this is defense in depth
+    /// against a stale render when a session expires or the user signs out.
+    func lockForAuthentication() {
+        SensitiveDiagnostics.setEnabled(false)
+        stopPolling()
+        conversations = []
+        selectedConversation = nil
+        messages = []
+        searchText = ""
+        searchResults = []
+        isSearching = false
+        dbError = nil
+        crmConfig = CRMConfig()
+        clearLegacySensitiveDiagnostics()
+    }
+
+    /// Legacy API keys are incompatible with the strict OIDC privacy gate.
+    /// Once the app reaches a confirmed signed-out state, remove their
+    /// persisted copies as well as the in-memory config snapshot.
+    func discardPersistedLegacyCredentials() {
+        var persisted = CRMConfig.load()
+        persisted.apiKey = ""
+        persisted.mirrorApiKey = ""
+        persisted.save()
     }
 
     /// Re-reads the persisted config and pushes it through the SAME
@@ -171,22 +204,29 @@ final class AppState {
     /// sign-in only takes effect after a full app relaunch, since the
     /// already-running `crmService` never learns its config changed.
     func refreshCRMConfigAfterAuthChange() {
+        guard authentication.state.allowsSensitiveContent else { return }
         crmConfig = CRMConfig.load()
         crmService?.updateConfig(crmConfig)
         if crmConfig.isEnabled {
             crmService?.startPolling()
         } else {
             crmService?.stopPolling()
+            // startPolling clears the all-background-work stop latch before
+            // it observes that automatic CRM polling is disabled. Manual
+            // forward/history operations therefore remain available while
+            // signed in, without starting a timer.
+            crmService?.startPolling()
         }
     }
 
     func selectConversation(_ conversation: Conversation) {
-        appLog("[AppState] selectConversation id=\(conversation.id)")
+        appLog("[AppState] selected conversation")
         selectedConversation = conversation
         loadMessages(for: conversation)
     }
 
     func loadConversations() {
+        guard authentication.state.allowsSensitiveContent else { return }
         do {
             var fetched = try chatDB.fetchConversations()
             for i in fetched.indices {
@@ -194,9 +234,6 @@ final class AppState {
             }
             conversations = fetched
             dbError = nil
-            // Dump conversation list so external tools can find chat identifiers
-            let dump = fetched.map { "\($0.id)\t\($0.displayName)" }.joined(separator: "\n")
-            try? dump.write(toFile: NSHomeDirectory() + "/Library/Logs/mfsynced_conversations.txt", atomically: true, encoding: .utf8)
         } catch {
             print("Failed to load conversations: \(error)")
             let msg = error.localizedDescription
@@ -209,29 +246,10 @@ final class AppState {
     }
 
     func loadMessages(for conversation: Conversation) {
+        guard authentication.state.allowsSensitiveContent else { return }
         do {
             messages = try chatDB.fetchMessages(forChat: conversation.id, limit: 200)
-            appLog("[AppState] loadMessages id=\(conversation.id) count=\(messages.count)")
-            // Dump all parsed messages to a readable log file
-            let iso = ISO8601DateFormatter()
-            let lines = messages.map { m -> String in
-                let ts = iso.string(from: m.date)
-                let dir = m.isFromMe ? "me  " : "them"
-                let text = m.displayText ?? "(nil)"
-                return "[\(ts)][\(dir)] \(text)"
-            }
-            let dump = "Thread: \(conversation.id) (\(messages.count) msgs)\n" + lines.joined(separator: "\n") + "\n"
-            appLog("[AppState] dump preview: \(lines.last ?? "(none)")")
-            let dumpPath = NSHomeDirectory() + "/Library/Logs/mfsynced_messages.txt"
-            if let dumpData = dump.data(using: .utf8) {
-                if let handle = FileHandle(forWritingAtPath: dumpPath) {
-                    handle.truncateFile(atOffset: 0)
-                    handle.write(dumpData)
-                    handle.closeFile()
-                } else {
-                    try? dumpData.write(to: URL(fileURLWithPath: dumpPath))
-                }
-            }
+            appLog("[AppState] loaded \(messages.count) messages")
         } catch {
             appLog("[AppState] loadMessages ERROR: \(error)")
             print("Failed to load messages: \(error)")
@@ -239,8 +257,10 @@ final class AppState {
     }
 
     func pollForNewMessages() {
+        guard authentication.state.allowsSensitiveContent else { return }
         do {
             let newMessages = try chatDB.fetchMessages(afterRowID: lastSeenRowID)
+            guard authentication.state.allowsSensitiveContent else { return }
             guard !newMessages.isEmpty else { return }
 
             if let maxID = newMessages.map(\.id).max() {
@@ -309,6 +329,7 @@ final class AppState {
     }
 
     func performSearch() {
+        guard authentication.state.allowsSensitiveContent else { return }
         guard !searchText.trimmingCharacters(in: .whitespaces).isEmpty else {
             clearSearch()
             return
@@ -328,18 +349,15 @@ final class AppState {
     }
 
     private func appLog(_ message: String) {
-        let path = NSHomeDirectory() + "/Library/Logs/mfsynced_crm.log"
-        let line = "\(Date()): \(message)\n"
-        guard let data = line.data(using: .utf8) else { return }
-        if let handle = FileHandle(forWritingAtPath: path) {
-            handle.seekToEndOfFile(); handle.write(data); handle.closeFile()
-        } else {
-            try? data.write(to: URL(fileURLWithPath: path))
-        }
+        SensitiveDiagnostics.record(message, bufferForFleet: false)
     }
 
-    func syncHistoryToCRM(for conversation: Conversation) async {
-        await syncHistoryToCRM(forChatIdentifier: conversation.id)
+    private func clearLegacySensitiveDiagnostics() {
+        SensitiveDiagnostics.purge()
+    }
+
+    func syncHistoryToCRM(for conversation: Conversation) {
+        syncHistoryToCRM(forChatIdentifier: conversation.id)
     }
 
     /// Same backfill as `syncHistoryToCRM(for:)`, driven by a bare chat
@@ -348,19 +366,24 @@ final class AppState {
     /// `startPolling()`) fires for a number the console just gated, which
     /// may not have a `Conversation` loaded in `conversations` yet — so it
     /// cannot go through `syncHistoryToCRM(for:)`'s conversation lookup.
-    func syncHistoryToCRM(forChatIdentifier chatIdentifier: String) async {
+    func syncHistoryToCRM(forChatIdentifier chatIdentifier: String) {
+        guard authentication.state.allowsSensitiveContent else { return }
         let contactName = contactStore.contact(for: chatIdentifier).fullName
         appLog("[AppState] syncHistoryToCRM called id=\(chatIdentifier) crmService=\(crmService != nil)")
         guard let svc = crmService else {
             appLog("[AppState] ERROR: crmService is nil — skipping sync")
             return
         }
-        await svc.syncHistory(chatIdentifier: chatIdentifier, chatDB: chatDB, contactName: contactName)
+        svc.startHistorySync(
+            chatIdentifier: chatIdentifier,
+            chatDB: chatDB,
+            contactName: contactName
+        )
     }
 
     /// Enables CRM sync for a conversation and syncs history if it wasn't already enabled.
     /// Called automatically when a conversation is forwarded to a teammate.
-    func enableCRMSyncIfNeeded(for conversation: Conversation) async {
+    func enableCRMSyncIfNeeded(for conversation: Conversation) {
         guard !crmConfig.syncedPhoneNumbers.contains(conversation.id) else { return }
         crmConfig.syncedPhoneNumbers.insert(conversation.id)
         crmConfig.save()
@@ -371,7 +394,7 @@ final class AppState {
                 selectedConversation = conversations[idx]
             }
         }
-        await syncHistoryToCRM(for: conversation)
+        syncHistoryToCRM(for: conversation)
     }
 }
 
@@ -383,6 +406,7 @@ struct ContentView: View {
     let appState: AppState
     @State private var columnVisibility = NavigationSplitViewVisibility.all
     @State private var showSetup = false
+    @State private var lastReconciledAuthenticationState: AuthenticationState?
 
     private var needsSetup: Bool {
         let setupComplete = UserDefaults.standard.bool(forKey: "mfsynced_setup_complete")
@@ -390,56 +414,131 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView(appState: appState)
-                .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
-                .toolbar {
-                    ToolbarItem(placement: .primaryAction) {
-                        if appState.dbError != nil {
-                            Button {
-                                showSetup = true
-                            } label: {
-                                Label("Setup", systemImage: "exclamationmark.triangle.fill")
-                                    .foregroundStyle(.orange)
-                            }
-                            .help("Fix setup issues")
-                        }
-                    }
-                }
-        } detail: {
-            if let conversation = appState.selectedConversation {
-                ChatView(
-                    conversation: conversation,
-                    messages: appState.messages,
-                    contact: appState.contactStore.contact(for: conversation.id),
-                    contactStore: appState.contactStore
-                )
-            } else {
-                Text("Select a conversation")
-                    .font(.title2)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+        Group {
+            switch AuthenticatedContentMode.resolve(for: appState.authentication.state) {
+            case .authenticationOnly:
+                AuthenticationGateView(authentication: appState.authentication)
+            case .sensitiveApplication:
+                authenticatedApplication
             }
         }
-        .onAppear {
-            appState.startPolling()
-            if needsSetup {
-                // Small delay so the window is visible before the sheet appears
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-                    showSetup = true
+        .task {
+            await appState.authentication.validateStartupSession()
+            reconcileAuthenticationState()
+
+            // Keep the persistent status honest after startup. A dead
+            // refresh token or validation failure re-locks both scenes and
+            // clears cached display state instead of silently falling back.
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+                } catch {
+                    return
                 }
+                await appState.authentication.revalidateAuthenticatedSession()
+                reconcileAuthenticationState()
             }
+        }
+        .onChange(of: appState.authentication.state) {
+            reconcileAuthenticationState()
         }
         .onDisappear {
             appState.stopPolling()
         }
-        .sheet(isPresented: $showSetup) {
-            SetupView(isPresented: $showSetup) {
-                // Re-run startup after setup so conversations load
-                appState.stopPolling()
-                appState.crmConfig = CRMConfig.load()
-                appState.startPolling()
+    }
+
+    @ViewBuilder
+    private var authenticatedApplication: some View {
+        VStack(spacing: 0) {
+            authenticatedStatusBar
+            Divider()
+            NavigationSplitView(columnVisibility: $columnVisibility) {
+                SidebarView(appState: appState)
+                    .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 360)
+                    .toolbar {
+                        ToolbarItem(placement: .primaryAction) {
+                            if appState.dbError != nil {
+                                Button {
+                                    showSetup = true
+                                } label: {
+                                    Label("Setup", systemImage: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(.orange)
+                                }
+                                .help("Fix setup issues")
+                            }
+                        }
+                    }
+            } detail: {
+                if let conversation = appState.selectedConversation {
+                    ChatView(
+                        conversation: conversation,
+                        messages: appState.messages,
+                        contact: appState.contactStore.contact(for: conversation.id),
+                        contactStore: appState.contactStore
+                    )
+                } else {
+                    Text("Select a conversation")
+                        .font(.title2)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
+            .onAppear {
+                appState.startPolling()
+                if needsSetup {
+                    // Small delay so the window is visible before the sheet appears
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                        showSetup = true
+                    }
+                }
+            }
+            .sheet(isPresented: $showSetup) {
+                SetupView(isPresented: $showSetup, authentication: appState.authentication) {
+                    // Re-run startup after setup so conversations load
+                    appState.stopPolling()
+                    appState.crmConfig = CRMConfig.load()
+                    appState.startPolling()
+                }
+            }
+        }
+    }
+
+    private var authenticatedStatusBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.shield.fill")
+                .foregroundStyle(.green)
+            Text("Authenticated")
+                .font(.callout.bold())
+            if let email = appState.authentication.state.authenticatedEmail {
+                Text(email)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Sign Out") {
+                Task { await appState.authentication.signOut() }
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(Color.green.opacity(0.08))
+        .accessibilityIdentifier("authenticated-status")
+    }
+
+    private func reconcileAuthenticationState() {
+        let state = appState.authentication.state
+        guard state != lastReconciledAuthenticationState else { return }
+        lastReconciledAuthenticationState = state
+        if state.allowsSensitiveContent {
+            appState.refreshCRMConfigAfterAuthChange()
+            appState.startPolling()
+        } else {
+            showSetup = false
+            if state == .signedOut {
+                appState.discardPersistedLegacyCredentials()
+            }
+            appState.lockForAuthentication()
         }
     }
 }

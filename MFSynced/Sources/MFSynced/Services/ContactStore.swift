@@ -10,8 +10,8 @@ private let contactStoreLogger = Logger(subsystem: "tech.moonfive.MFSynced", cat
 /// on every poll tick, so a write failure here still surfaces in the fleet
 /// log viewer without SSH access to the Mac.
 private func contactLog(_ message: String) {
+    guard SensitiveDiagnostics.record(message, bufferForFleet: true) else { return }
     contactStoreLogger.info("\(message, privacy: .public)")
-    FleetLogBuffer.shared.append(category: "ContactStore", line: message)
 }
 
 @Observable
@@ -19,6 +19,8 @@ final class ContactStore {
     private var cache: [String: Contact] = [:]
     private let store = CNContactStore()
     private var phoneToContact: [String: (name: String, photo: NSImage?)] = [:]
+    private var avatarJPEGCache: [String: Data] = [:]
+    private var identifiersWithoutAvatarJPEG: Set<String> = []
     private var isLoaded = false
 
     func contact(for identifier: String) -> Contact {
@@ -64,8 +66,18 @@ final class ContactStore {
     /// the single-digit-KB range regardless of what Contacts hands back.
     func contactInfo(for identifier: String) -> (name: String?, photoJPEG: Data?) {
         let resolved = contact(for: identifier)
-        guard let photo = resolved.photo else { return (resolved.fullName, nil) }
-        guard let jpeg = Self.avatarJPEG(from: photo) else { return (resolved.fullName, nil) }
+        if let cached = avatarJPEGCache[identifier] {
+            return (resolved.fullName, cached)
+        }
+        if identifiersWithoutAvatarJPEG.contains(identifier) {
+            return (resolved.fullName, nil)
+        }
+        guard let photo = resolved.photo,
+              let jpeg = Self.avatarJPEG(from: photo) else {
+            identifiersWithoutAvatarJPEG.insert(identifier)
+            return (resolved.fullName, nil)
+        }
+        avatarJPEGCache[identifier] = jpeg
         return (resolved.fullName, jpeg)
     }
 
@@ -248,6 +260,8 @@ final class ContactStore {
     func refresh() async {
         await MainActor.run {
             cache.removeAll()
+            avatarJPEGCache.removeAll()
+            identifiersWithoutAvatarJPEG.removeAll()
             isLoaded = false
         }
         await buildPhoneMap()
@@ -297,15 +311,18 @@ final class ContactStore {
             return
         }
 
+        let completedMap = newMap
         await MainActor.run {
-            self.phoneToContact = newMap
+            self.phoneToContact = completedMap
+            self.avatarJPEGCache.removeAll()
+            self.identifiersWithoutAvatarJPEG.removeAll()
             self.isLoaded = true
 
             // Re-resolve any cached contacts that were unresolved
             for (identifier, existing) in cache where existing.fullName == nil {
                 let digits = identifier.filter { $0.isNumber }
                 let last10 = String(digits.suffix(10))
-                if let match = newMap[digits] ?? newMap[last10] {
+                if let match = completedMap[digits] ?? completedMap[last10] {
                     cache[identifier] = Contact(id: identifier, fullName: match.name, photo: match.photo)
                 }
             }

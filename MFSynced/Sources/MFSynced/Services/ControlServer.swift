@@ -10,6 +10,10 @@ final class ControlServer {
     private var listener: NWListener?
     private let syncService: CRMSyncService
     private let port: UInt16
+    private let lifecycleLock = NSLock()
+    private var stopped = true
+    private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var connections: [UUID: NWConnection] = [:]
 
     init(syncService: CRMSyncService, port: UInt16 = 7891) {
         self.syncService = syncService
@@ -17,6 +21,9 @@ final class ControlServer {
     }
 
     func start() {
+        lifecycleLock.lock()
+        stopped = false
+        lifecycleLock.unlock()
         let params = NWParameters.tcp
         params.requiredLocalEndpoint = NWEndpoint.hostPort(host: .ipv4(.loopback), port: NWEndpoint.Port(rawValue: port)!)
 
@@ -46,19 +53,43 @@ final class ControlServer {
     func stop() {
         listener?.cancel()
         listener = nil
+        lifecycleLock.lock()
+        stopped = true
+        let tasks = Array(self.tasks.values)
+        self.tasks.removeAll()
+        let connections = Array(self.connections.values)
+        self.connections.removeAll()
+        lifecycleLock.unlock()
+        tasks.forEach { $0.cancel() }
+        connections.forEach { $0.cancel() }
     }
 
     // MARK: - Connection handling
 
     private func handleConnection(_ conn: NWConnection) {
+        let connectionID = UUID()
+        lifecycleLock.lock()
+        guard !stopped else {
+            lifecycleLock.unlock()
+            conn.cancel()
+            return
+        }
+        connections[connectionID] = conn
+        lifecycleLock.unlock()
         conn.start(queue: .global(qos: .utility))
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, _, error in
-            guard let self, let data else {
+            guard let self, self.isActive, let data else {
                 conn.cancel()
+                self?.removeConnection(conn)
                 return
             }
             let (method, path, body) = self.parseHTTPRequest(data)
-            self.route(method: method, path: path, body: body) { statusCode, responseBody in
+            self.route(method: method, path: path, body: body) { [weak self] statusCode, responseBody in
+                guard let self, self.isActive else {
+                    conn.cancel()
+                    self?.removeConnection(conn)
+                    return
+                }
                 self.sendHTTPResponse(conn, statusCode: statusCode, body: responseBody)
             }
         }
@@ -84,6 +115,11 @@ final class ControlServer {
     }
 
     private func sendHTTPResponse(_ conn: NWConnection, statusCode: Int, body: Data) {
+        guard isActive else {
+            conn.cancel()
+            removeConnection(conn)
+            return
+        }
         let statusText: String
         switch statusCode {
         case 200: statusText = "OK"
@@ -100,8 +136,9 @@ final class ControlServer {
         var fullResponse = response.data(using: .utf8)!
         fullResponse.append(body)
 
-        conn.send(content: fullResponse, completion: .contentProcessed { _ in
+        conn.send(content: fullResponse, completion: .contentProcessed { [weak self] _ in
             conn.cancel()
+            self?.removeConnection(conn)
         })
     }
 
@@ -126,7 +163,12 @@ final class ControlServer {
     // MARK: - Handlers
 
     private func handleHealth(completion: @escaping (Int, Data) -> Void) {
-        Task { @MainActor in
+        let taskID = UUID()
+        let startGate = TrackedTaskStartGate()
+        let task = Task { @MainActor [weak self] in
+            await startGate.wait()
+            defer { self?.removeTask(taskID) }
+            guard let self, self.isActive, !Task.isCancelled else { return }
             let resp: [String: Any] = [
                 "status": "ok",
                 "crm_enabled": self.syncService.isConnected || self.syncService.lastSyncTime != nil,
@@ -138,12 +180,19 @@ final class ControlServer {
             ]
             completion(200, self.jsonData(resp))
         }
+        register(task, id: taskID, startGate: startGate)
     }
 
     private func handlePoll(completion: @escaping (Int, Data) -> Void) {
-        Task {
+        let taskID = UUID()
+        let startGate = TrackedTaskStartGate()
+        let task = Task { [weak self] in
+            await startGate.wait()
+            defer { self?.removeTask(taskID) }
+            guard let self, self.isActive, !Task.isCancelled else { return }
             let countBefore = await MainActor.run { self.syncService.recentOutboundResults.count }
             await self.syncService.poll()
+            guard self.isActive, !Task.isCancelled else { return }
             let results = await MainActor.run { Array(self.syncService.recentOutboundResults.suffix(from: min(countBefore, self.syncService.recentOutboundResults.count))) }
 
             let entries = results.map { r -> [String: Any] in
@@ -163,10 +212,16 @@ final class ControlServer {
             ]
             completion(200, self.jsonData(resp))
         }
+        register(task, id: taskID, startGate: startGate)
     }
 
     private func handleOutboundLog(completion: @escaping (Int, Data) -> Void) {
-        Task { @MainActor in
+        let taskID = UUID()
+        let startGate = TrackedTaskStartGate()
+        let task = Task { @MainActor [weak self] in
+            await startGate.wait()
+            defer { self?.removeTask(taskID) }
+            guard let self, self.isActive, !Task.isCancelled else { return }
             let entries = self.syncService.recentOutboundResults.map { r -> [String: Any] in
                 [
                     "command_id": r.commandID,
@@ -179,6 +234,7 @@ final class ControlServer {
             }
             completion(200, self.jsonData(["entries": entries]))
         }
+        register(task, id: taskID, startGate: startGate)
     }
 
     private func handleSend(body: Data?, completion: @escaping (Int, Data) -> Void) {
@@ -189,19 +245,65 @@ final class ControlServer {
             completion(400, jsonData(["error": "Missing phone or text in request body"]))
             return
         }
-        let hint = syncService.chatServiceHint?(phone)
-        let result = MessageSender.send(text: text, to: phone, preferredService: hint)
-        switch result {
-        case .success:
-            completion(200, jsonData(["status": "sent", "phone": phone]))
-        case .failure(let err):
-            completion(500, jsonData(["status": "failed", "error": err.localizedDescription]))
+        let taskID = UUID()
+        let startGate = TrackedTaskStartGate()
+        let task = Task { [weak self] in
+            await startGate.wait()
+            defer { self?.removeTask(taskID) }
+            guard let self, self.isActive, !Task.isCancelled else { return }
+            let hint = self.syncService.chatServiceHint?(phone)
+            guard self.isActive, !Task.isCancelled else { return }
+            let result = MessageSender.send(text: text, to: phone, preferredService: hint)
+            switch result {
+            case .success:
+                completion(200, self.jsonData(["status": "sent", "phone": phone]))
+            case .failure(let err):
+                completion(500, self.jsonData(["status": "failed", "error": err.localizedDescription]))
+            }
         }
+        register(task, id: taskID, startGate: startGate)
     }
 
     // MARK: - Helpers
 
     private func jsonData(_ dict: [String: Any]) -> Data {
         (try? JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])) ?? "{}".data(using: .utf8)!
+    }
+
+    private var isActive: Bool {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        return !stopped
+    }
+
+    private func register(
+        _ task: Task<Void, Never>,
+        id: UUID,
+        startGate: TrackedTaskStartGate
+    ) {
+        lifecycleLock.lock()
+        if stopped {
+            lifecycleLock.unlock()
+            task.cancel()
+            startGate.open()
+            return
+        }
+        tasks[id] = task
+        lifecycleLock.unlock()
+        startGate.open()
+    }
+
+    private func removeTask(_ id: UUID) {
+        lifecycleLock.lock()
+        tasks.removeValue(forKey: id)
+        lifecycleLock.unlock()
+    }
+
+    private func removeConnection(_ connection: NWConnection) {
+        lifecycleLock.lock()
+        if let id = connections.first(where: { $0.value === connection })?.key {
+            connections.removeValue(forKey: id)
+        }
+        lifecycleLock.unlock()
     }
 }

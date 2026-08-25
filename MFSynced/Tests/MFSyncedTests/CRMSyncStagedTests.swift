@@ -1,6 +1,23 @@
 import XCTest
 @testable import MFSynced
 
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+
+    func set() {
+        lock.lock()
+        stored = true
+        lock.unlock()
+    }
+
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
 final class CRMSyncStagedTests: XCTestCase {
 
     // MARK: - Test helpers
@@ -654,7 +671,11 @@ final class CRMSyncStagedTests: XCTestCase {
         config.apiEndpoint = "http://127.0.0.1:1/v1/agent"
         config.apiKey = "test"
         config.syncedPhoneNumbers = synced
-        return CRMSyncService(config: config, syncQueue: syncQueue)
+        return CRMSyncService(
+            config: config,
+            syncQueue: syncQueue,
+            authService: .legacyCompatibilityFixture()
+        )
     }
 
     func testUploadStagedNoOpWithoutProviders() async {
@@ -670,19 +691,20 @@ final class CRMSyncStagedTests: XCTestCase {
         await service.uploadStaged()
     }
 
+    @MainActor
     func testUploadStagedSkipsAllGatedChats() async {
         let service = makeService(synced: ["+15551234567"])
         service.catalogChatsProvider = {
             [ChatCatalogEntry(chatIdentifier: "+15551234567", displayName: nil, lastActivityAt: nil, messageCount: 5)]
         }
-        var providerCalled = false
+        let providerCalled = LockedFlag()
         service.stagedMessagesProvider = { _, _ in
-            providerCalled = true
+            providerCalled.set()
             return []
         }
         await service.uploadStaged()
         // The only catalog chat is gated (already live-synced) — the plan
         // must exclude it entirely, so the fetch provider is never called.
-        XCTAssertFalse(providerCalled)
+        XCTAssertFalse(providerCalled.value)
     }
 }

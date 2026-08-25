@@ -3,27 +3,139 @@ import OSLog
 
 private let crmLogger = Logger(subsystem: "tech.moonfive.MFSynced", category: "CRMSync")
 
-private func crmLog(_ message: String) {
-    crmLogger.info("\(message, privacy: .public)")
-    // Buffered for upload to the nexus (drained by uploadLogs each poll) —
-    // an append can never block or fail, see FleetLogBuffer.
-    FleetLogBuffer.shared.append(line: message)
-    // Also write to file for easy tailing
-    let path = NSHomeDirectory() + "/Library/Logs/mfsynced_crm.log"
-    let line = "\(Date()): \(message)\n"
-    guard let data = line.data(using: .utf8) else { return }
-    if FileManager.default.fileExists(atPath: path),
-       let handle = FileHandle(forWritingAtPath: path) {
-        handle.seekToEndOfFile()
-        handle.write(data)
-        handle.closeFile()
-    } else {
-        try? FileManager.default.createDirectory(
-            atPath: NSHomeDirectory() + "/Library/Logs",
-            withIntermediateDirectories: true
-        )
-        try? data.write(to: URL(fileURLWithPath: path))
+/// A one-shot synchronous-to-async start barrier. Tracked tasks wait here
+/// until their owner has inserted them into its cancellation registry,
+/// eliminating the finish-before-register and stop-between-create/insert
+/// races without running work under an NSLock.
+final class TrackedTaskStartGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if isOpen {
+                lock.unlock()
+                continuation.resume()
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
     }
+
+    func open() {
+        lock.lock()
+        guard !isOpen else { lock.unlock(); return }
+        isOpen = true
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume()
+    }
+}
+
+enum SensitiveDiagnostics {
+    private static let lock = NSLock()
+    private static let ioQueue = DispatchQueue(label: "tech.moonfive.MFSynced.sensitive-diagnostics")
+    private static var logsDirectory = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs", isDirectory: true)
+    private static var enabled = false
+    private static var generation: UInt64 = 0
+
+    static func configure(logsDirectory: URL) {
+        lock.lock()
+        self.logsDirectory = logsDirectory
+        generation &+= 1
+        lock.unlock()
+        ioQueue.sync {
+            try? FileManager.default.createDirectory(
+                at: logsDirectory,
+                withIntermediateDirectories: true
+            )
+        }
+    }
+
+    static func setEnabled(_ value: Bool) {
+        lock.lock()
+        enabled = value
+        if !value { generation &+= 1 }
+        lock.unlock()
+    }
+
+    @discardableResult
+    static func record(_ message: String, bufferForFleet: Bool) -> Bool {
+        lock.lock()
+        guard enabled else { lock.unlock(); return false }
+        let directory = logsDirectory
+        let recordGeneration = generation
+        if bufferForFleet {
+            FleetLogBuffer.shared.append(line: message)
+        }
+        lock.unlock()
+
+        let path = directory.appendingPathComponent("mfsynced_crm.log")
+        let line = "\(Date()): \(message)\n"
+        guard let data = line.data(using: .utf8) else { return true }
+        ioQueue.async {
+            // A disable/purge or directory reconfiguration invalidates every
+            // queued write from the previous generation. purge() also runs
+            // its deletion on this queue, so a write already in progress is
+            // guaranteed to finish before the file is removed.
+            lock.lock()
+            let shouldWrite = enabled
+                && generation == recordGeneration
+                && logsDirectory == directory
+            lock.unlock()
+            guard shouldWrite else { return }
+            if let handle = try? FileHandle(forWritingTo: path) {
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+                try? handle.close()
+            } else {
+                try? data.write(to: path)
+            }
+        }
+        return true
+    }
+
+    static func purge() {
+        lock.lock()
+        enabled = false
+        generation &+= 1
+        let directory = logsDirectory
+        FleetLogBuffer.shared.purge()
+        lock.unlock()
+        ioQueue.sync {
+            for filename in [
+                "mfsynced_messages.txt",
+                "mfsynced_conversations.txt",
+                "mfsynced_crm.log",
+            ] {
+                try? FileManager.default.removeItem(
+                    at: directory.appendingPathComponent(filename)
+                )
+            }
+        }
+    }
+
+    /// Returns a failed upload batch to the in-memory queue only while
+    /// sensitive diagnostics are still enabled. Sign-out disables and
+    /// purges under this same lock, so an in-flight upload can never put
+    /// drained identifiers or message metadata back after the privacy gate
+    /// closes.
+    static func requeue(_ batch: [FleetLogBuffer.Entry]) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard enabled else { return }
+        FleetLogBuffer.shared.requeue(batch)
+    }
+}
+
+private func crmLog(_ message: String) {
+    guard SensitiveDiagnostics.record(message, bufferForFleet: true) else { return }
+    crmLogger.info("\(message, privacy: .public)")
 }
 
 struct OutboundResult {
@@ -77,9 +189,9 @@ final class CRMSyncService {
     /// Looks up a chat's Messages service ("iMessage"/"SMS"/...) so outbound
     /// sends target the right account. Injected (ChatDatabase-backed) so the
     /// sync service stays testable without a live chat.db.
-    var chatServiceHint: ((String) -> String?)?
+    var chatServiceHint: (@Sendable (String) -> String?)?
     /// CNContactStore name + JPEG for a phone; injected like chatServiceHint.
-    var contactInfoProvider: ((String) -> (name: String?, photoJPEG: Data?))?
+    var contactInfoProvider: (@MainActor @Sendable (String) -> (name: String?, photoJPEG: Data?))?
     /// Test seam for `pushContactInfo()`'s `/contacts` POST: when set, the
     /// request is routed through this closure instead of a real `URLSession`
     /// call, returning the HTTP status code to react to (nil simulates a
@@ -97,7 +209,7 @@ final class CRMSyncService {
     /// `false` (no local match, or nothing changed) still counts as a
     /// successfully-applied update for cursor-advance purposes; only a
     /// thrown network/parse error withholds the advance.
-    var contactUpdateApplier: (([String], String?, Data?) -> Bool)?
+    var contactUpdateApplier: (@MainActor @Sendable ([String], String?, Data?) -> Bool)?
     /// Test seam for `pullContactUpdates()`'s GET `/contact-updates`: when
     /// set, the request is routed through this closure instead of a real
     /// `URLSession` call, returning (status code, response body) to react
@@ -110,7 +222,7 @@ final class CRMSyncService {
     /// Enumerates every 1:1 conversation (metadata only) for the candidate
     /// catalog upload; injected (ChatDatabase.fetchCatalog()-backed in
     /// production) so the sync service stays testable without a live chat.db.
-    var catalogChatsProvider: (() throws -> [ChatCatalogEntry])?
+    var catalogChatsProvider: (@Sendable () throws -> [ChatCatalogEntry])?
     /// Fetches one chat's messages for staged upload — the `StagedFetchMode`
     /// says which of ChatDatabase's three fetch shapes to use: `.backfill`
     /// → newest `limit` (fetchMessages(forChat:limit:)); `.continueBackfill`
@@ -119,7 +231,7 @@ final class CRMSyncService {
     /// (fetchMessages(forChat:afterRowID:limit:)). Injected like
     /// catalogChatsProvider so the sync service stays testable without a
     /// live chat.db.
-    var stagedMessagesProvider: ((_ chatIdentifier: String, _ mode: StagedFetchMode) throws -> [Message])?
+    var stagedMessagesProvider: (@Sendable (_ chatIdentifier: String, _ mode: StagedFetchMode) throws -> [Message])?
     // Internal (not private) for test visibility of retry semantics.
     var pushedContactPhones = Set<String>()
     /// Catalog gating state — in-memory only (telemetry-like: a relaunch
@@ -144,7 +256,7 @@ final class CRMSyncService {
     /// live chat.db). nil (unset, or the provider itself returning nil)
     /// just omits `send_handle` from the heartbeat, same degrade as a
     /// blank owner_email.
-    var selfHandleProvider: (() -> String?)?
+    var selfHandleProvider: (@Sendable () -> String?)?
     /// `currentSendHandle()`'s cache — in-memory only, same rationale as
     /// `lastCatalogUploadAt`/`lastCatalogFingerprint`: a relaunch
     /// re-querying is fine and intended. UNLIKE most of this class's other
@@ -167,10 +279,10 @@ final class CRMSyncService {
     private let sendHandleLock = NSLock()
     /// chat.db's current max message ROWID — watermark taken just before a
     /// send so the verifier can find the row that send created.
-    var chatMaxRowID: (() -> Int64)?
+    var chatMaxRowID: (@Sendable () -> Int64)?
     /// Delivery state (receipt + error code) of the first outgoing message
     /// after a watermark; nil until Messages writes the row.
-    var deliveryProbe: ((String, Int64) -> (delivered: Bool, errorCode: Int)?)?
+    var deliveryProbe: (@Sendable (String, Int64) -> (delivered: Bool, errorCode: Int)?)?
     /// Fires once for each identifier `pullGate()` finds newly added to the
     /// server-desired gate (see `gateBackfillTargets`) — the completeness
     /// backstop beyond the ~2000 staged rows the server already promoted:
@@ -178,9 +290,11 @@ final class CRMSyncService {
     /// syncHistory path the forward/manual-add flows use. Injected
     /// (AppState-backed, driving AppState.syncHistoryToCRM(forChatIdentifier:))
     /// so the sync service stays testable without a live chat.db — same DI
-    /// pattern as catalogChatsProvider/stagedMessagesProvider. Fire-and-
-    /// forget: the closure itself owns kicking off the (async) backfill.
-    var historyBackfillRequest: ((String) -> Void)?
+    /// pattern as catalogChatsProvider/stagedMessagesProvider. The service
+    /// launches each callback in its tracked background-task registry so a
+    /// long backfill never stalls heartbeat/outbound delivery and sign-out
+    /// can still cancel it.
+    var historyBackfillRequest: (@MainActor @Sendable (String) async -> Void)?
     /// Identifiers already sent through `historyBackfillRequest` this
     /// process launch — in-memory only (telemetry-like: a relaunch
     /// re-running a backfill is acceptable, same rationale as
@@ -191,6 +305,13 @@ final class CRMSyncService {
     /// correctness fix. Internal (not private) for test visibility.
     var backfilledThisSession = Set<String>()
     private var pollTimer: Timer?
+    private let taskLock = NSLock()
+    private var pollTask: Task<Void, Never>?
+    /// All work intentionally detached from the serial poll (delivery
+    /// receipt checks and gate-triggered history backfills). Registration
+    /// and stop use the same lock so nothing can escape sign-out cleanup.
+    private var backgroundTasks: [UUID: Task<Void, Never>] = [:]
+    private var stopped = false
     /// Main-thread only (timer closure + main-actor reset).
     private var pollInFlight = false
     /// Best-effort re-entrancy guard for uploadStaged() — NOT a mutex, and
@@ -211,13 +332,11 @@ final class CRMSyncService {
     init(
         config: CRMConfig,
         syncQueue: SyncQueueDatabase = SyncQueueDatabase(),
-        // Defaults to an in-memory (never-persisted) token store so unit
-        // tests — none of which inject an AuthService — can never touch
-        // the real system keychain or race a signed-in state left over
-        // from a prior run. Production wires AuthService.shared
-        // (Keychain-backed) explicitly at its one call site
-        // (AppState.startPolling).
-        authService: AuthService = AuthService(tokenStore: InMemoryTokenStore())
+        // Explicit by design. Production wires AuthService.shared
+        // (Keychain-backed) at its one call site (AppState.startPolling).
+        // Compatibility tests inject a legacy-enabled in-memory fixture, so
+        // a new production call site can never inherit fallback by default.
+        authService: AuthService
     ) {
         self._config = config
         self.syncQueue = syncQueue
@@ -236,20 +355,11 @@ final class CRMSyncService {
     }
 
     /// Resolves the Authorization header value for an outbound request:
-    /// prefers the OIDC (OpenID Connect) access token (auto-refreshing through AuthService
-    /// as needed); falls back to the legacy per-agent API key ONLY while
-    /// signed out AND a legacy key is still configured — keeps an
-    /// already-installed agent working through the OIDC migration without
-    /// forcing an immediate re-sign-in. Returns nil when there is truly
-    /// nothing to authenticate with (signed out, no legacy key); callers
-    /// treat that like any other not-configured precondition and skip the
-    /// request for this tick.
+    /// Delegates every credential decision to AuthService. Production uses
+    /// the shared OIDC-required instance; isolated compatibility tests opt
+    /// into the legacy key path explicitly.
     private func authorizationHeaderValue() async -> String? {
-        if let token = try? await authService.validAccessToken() {
-            return "Bearer \(token)"
-        }
-        guard !config.apiKey.isEmpty else { return nil }
-        return "Bearer \(config.apiKey)"
+        await authService.authorizationHeaderValue(legacyKey: config.apiKey)
     }
 
     /// Builds one outbound request with the standard auth + agent-identity
@@ -281,6 +391,13 @@ final class CRMSyncService {
     }
 
     func startPolling() {
+        // `stopped` blocks every tracked background operation, including a
+        // user-requested history sync. Clear it before the automatic-polling
+        // configuration guard: CRM can be disabled while manual forwarding
+        // and history sync remain valid authenticated actions.
+        taskLock.lock()
+        stopped = false
+        taskLock.unlock()
         // Endpoint availability checks agentEndpoint (not the raw legacy
         // apiEndpoint field): a sign-in-only install never populates
         // apiEndpoint at all, but always has a non-empty sync target to
@@ -303,14 +420,30 @@ final class CRMSyncService {
             }
             self.pollInFlight = true
             crmLog("[CRM] timer fired")
-            Task {
+            let task = Task {
                 await self.poll()
                 await MainActor.run { self.pollInFlight = false }
             }
+            self.taskLock.lock()
+            self.pollTask = task
+            self.taskLock.unlock()
         }
     }
 
-    func stopPolling() { pollTimer?.invalidate(); pollTimer = nil }
+    func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+        pollInFlight = false
+        taskLock.lock()
+        stopped = true
+        let pollTask = self.pollTask
+        self.pollTask = nil
+        let backgroundTasks = Array(self.backgroundTasks.values)
+        self.backgroundTasks.removeAll()
+        taskLock.unlock()
+        pollTask?.cancel()
+        backgroundTasks.forEach { $0.cancel() }
+    }
 
     func queueInbound(message: Message, contactName: String? = nil) {
         guard config.syncedPhoneNumbers.contains(message.chatIdentifier ?? "") else { return }
@@ -335,24 +468,40 @@ final class CRMSyncService {
     private(set) var serverGateActive = false
 
     func poll() async {
+        guard !Task.isCancelled, !isStopped else { return }
         crmLog("[CRM] poll() called")
         await pullGate()
+        guard !Task.isCancelled, !isStopped else { return }
         await pullContactUpdates()
+        guard !Task.isCancelled, !isStopped else { return }
         await sendHeartbeat()
+        guard !Task.isCancelled, !isStopped else { return }
         await pushInbound()
+        guard !Task.isCancelled, !isStopped else { return }
         await pullOutbound()
+        guard !Task.isCancelled, !isStopped else { return }
         await pushContactInfo()
+        guard !Task.isCancelled, !isStopped else { return }
         await updateCounts()
+        guard !Task.isCancelled, !isStopped else { return }
         // Last on purpose: logs describe the tick that just happened, and a
         // slow/failed upload must never delay the messaging work above.
         await uploadLogs()
+        guard !Task.isCancelled, !isStopped else { return }
         // After logs, never blocking messaging: candidate catalog is
         // telemetry for the console review tab, not part of the send/receive
         // path.
         await uploadCatalog()
+        guard !Task.isCancelled, !isStopped else { return }
         // Last of all: staged content upload is background console-review
         // material for non-gated chats, never part of the send/receive path.
         await uploadStaged()
+    }
+
+    private var isStopped: Bool {
+        taskLock.lock()
+        defer { taskLock.unlock() }
+        return stopped
     }
 
     /// Drain one batch of buffered crmLog lines to the nexus
@@ -364,7 +513,7 @@ final class CRMSyncService {
         guard !batch.isEmpty else { return }
         guard let url = URL(string: "\(agentEndpoint)/logs") else { return }
         guard let authorization = await authorizationHeaderValue() else {
-            FleetLogBuffer.shared.requeue(batch)
+            SensitiveDiagnostics.requeue(batch)
             return
         }
 
@@ -384,7 +533,7 @@ final class CRMSyncService {
         do {
             let (_, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                FleetLogBuffer.shared.requeue(batch)
+                SensitiveDiagnostics.requeue(batch)
                 return
             }
             switch http.statusCode {
@@ -393,10 +542,10 @@ final class CRMSyncService {
             case 404:
                 break  // Legacy backend: no log wire; drop the batch.
             default:
-                FleetLogBuffer.shared.requeue(batch)
+                SensitiveDiagnostics.requeue(batch)
             }
         } catch {
-            FleetLogBuffer.shared.requeue(batch)
+            SensitiveDiagnostics.requeue(batch)
         }
     }
 
@@ -482,7 +631,11 @@ final class CRMSyncService {
             for phone in backfillTargets {
                 backfilledThisSession.insert(phone)
                 crmLog("[CRM] gate backfill: triggering history sync for \(phone)")
-                historyBackfillRequest?(phone)
+                guard let historyBackfillRequest else { continue }
+                launchBackgroundTask { [weak self] in
+                    guard let self, !Task.isCancelled, !self.isStopped else { return }
+                    await historyBackfillRequest(phone)
+                }
             }
         } catch {
             // Offline or transient — keep the last applied list.
@@ -625,7 +778,7 @@ final class CRMSyncService {
                 return
             }
             for update in updates {
-                _ = applier(update.phones, update.displayName, update.photoJPEG)
+                _ = await applier(update.phones, update.displayName, update.photoJPEG)
             }
             do {
                 try syncQueue.setState(key: Self.contactUpdatesCursorKey, value: String(newCursor))
@@ -710,17 +863,18 @@ final class CRMSyncService {
     /// the cache fields themselves need mutual exclusion. Internal (not
     /// private) for direct test access without going through the async
     /// network path in `sendHeartbeat()`.
-    func currentSendHandle() -> String? {
+    func currentSendHandle() async -> String? {
         guard let provider = selfHandleProvider else { return nil }
         let now = ProcessInfo.processInfo.systemUptime
 
-        sendHandleLock.lock()
-        if let last = lastSendHandleQueryAt, now - last < sendHandleCacheIntervalSeconds {
-            let cached = cachedSendHandle
-            sendHandleLock.unlock()
-            return cached
+        let freshCache: (isFresh: Bool, value: String?) = sendHandleLock.withLock {
+            guard let last = lastSendHandleQueryAt,
+                  now - last < sendHandleCacheIntervalSeconds else {
+                return (false, nil)
+            }
+            return (true, cachedSendHandle)
         }
-        sendHandleLock.unlock()
+        if freshCache.isFresh { return freshCache.value }
 
         // Provider call happens outside the lock (see doc comment) — two
         // threads can race into here and both call the provider, but each
@@ -729,10 +883,10 @@ final class CRMSyncService {
         // (whichever thread writes last), never a torn value.
         let result = provider()
 
-        sendHandleLock.lock()
-        lastSendHandleQueryAt = now
-        cachedSendHandle = result
-        sendHandleLock.unlock()
+        sendHandleLock.withLock {
+            lastSendHandleQueryAt = now
+            cachedSendHandle = result
+        }
 
         return result
     }
@@ -746,7 +900,7 @@ final class CRMSyncService {
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             uptimeSeconds: Int(Date().timeIntervalSince(launchedAt)),
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-            sendHandle: currentSendHandle()
+            sendHandle: await currentSendHandle()
         )
         let bodyData = try? JSONSerialization.data(withJSONObject: body)
         let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
@@ -785,7 +939,7 @@ final class CRMSyncService {
         guard let provider = contactInfoProvider else { return }
         guard let authorization = await authorizationHeaderValue() else { return }
         for phone in config.syncedPhoneNumbers where !pushedContactPhones.contains(phone) {
-            let (name, photoJPEG) = provider(phone)
+            let (name, photoJPEG) = await provider(phone)
             // Not marked pushed yet: an unresolved contact (ContactStore may
             // still be building its phone map, or waiting on the permission
             // dialog) must be retried on a later poll, not skipped for the
@@ -969,21 +1123,25 @@ final class CRMSyncService {
         }
 
         guard let rawChats = try? provider() else { return }
-        let chats: [CatalogChatInput] = rawChats.map { entry in
-            let contact = contactInfoProvider?(entry.chatIdentifier)
+        var chats: [CatalogChatInput] = []
+        chats.reserveCapacity(rawChats.count)
+        for entry in rawChats {
+            guard !Task.isCancelled, !isStopped else { return }
+            let contact = await contactInfoProvider?(entry.chatIdentifier)
+            guard !Task.isCancelled, !isStopped else { return }
             // chat.db stores EMPTY STRING (not NULL) for nearly every 1:1
             // chat's display_name — `??` alone never fires, and the nexus
             // requires a non-empty display_name, so "" would 422 the whole
             // catalog chunk. Empty means absent here.
             let rawName = entry.displayName ?? ""
-            return CatalogChatInput(
+            chats.append(CatalogChatInput(
                 chatIdentifier: entry.chatIdentifier,
                 displayName: rawName.isEmpty ? entry.chatIdentifier : rawName,
                 contactName: contact?.name,
                 photoJPEG: contact?.photoJPEG,
                 lastActivityAt: entry.lastActivityAt,
                 messageCount: entry.messageCount
-            )
+            ))
         }
         let fingerprint = Self.catalogFingerprint(chats: chats)
 
@@ -996,7 +1154,19 @@ final class CRMSyncService {
             lastSuccessAt: lastCatalogSuccessAt,
             floorIntervalSeconds: catalogFloorIntervalSeconds
         )
-        guard decision == .upload else { return }
+        switch decision {
+        case .tooSoon:
+            return
+        case .skipUnchanged:
+            // The full database/enrichment pass itself is an attempt worth
+            // throttling. Without advancing this timestamp an unchanged
+            // catalog would repeat every poll tick until the forced-resend
+            // floor, including one MainActor contact lookup per chat.
+            lastCatalogUploadAt = now
+            return
+        case .upload:
+            break
+        }
         // Set BEFORE the network call: the 60s floor limits attempt
         // frequency regardless of outcome, so a persistently failing
         // endpoint can't be hammered every poll tick.
@@ -1329,12 +1499,14 @@ final class CRMSyncService {
         var allRows: [StagedMessageRow] = []
         var exhaustedChats: Set<String> = []
         for entry in plan {
+            guard !Task.isCancelled, !isStopped else { return }
             // The POST-side row budget: incremental plan entries are
             // budget-free probes, so the total is enforced here instead.
             // Rows beyond the cap are never fetched/sent; unconfirmed means
             // their cursors don't advance, so they re-offer next tick.
             if allRows.count >= Self.stagedBatchLimit { break }
             let messages = (try? messagesProvider(entry.chatIdentifier, entry.mode)) ?? []
+            guard !Task.isCancelled, !isStopped else { return }
             if case .continueBackfill = entry.mode, messages.isEmpty {
                 exhaustedChats.insert(entry.chatIdentifier)
             }
@@ -1418,10 +1590,15 @@ final class CRMSyncService {
     /// acks "failed" so the portal finally SHOWS undelivered sends.
     private func verifyDeliveryAndAck(commandID: String, phone: String, afterRowID: Int64) {
         guard let probe = deliveryProbe else { return }
-        Task.detached { [weak self] in
+        launchBackgroundTask { [weak self] in
             for _ in 0..<15 {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                } catch {
+                    return
+                }
                 guard let self else { return }
+                guard !Task.isCancelled, !self.isStopped else { return }
                 guard let state = probe(phone, afterRowID) else { continue }
                 if let verdict = MessageSender.deliveryAckStatus(
                     errorCode: state.errorCode, delivered: state.delivered
@@ -1433,6 +1610,35 @@ final class CRMSyncService {
             }
             crmLog("[CRM] deliveryVerify: cmd=\(commandID) no receipt in 30s — left as sent")
         }
+    }
+
+    private func launchBackgroundTask(
+        _ operation: @escaping @Sendable () async -> Void
+    ) {
+        let taskID = UUID()
+        let startGate = TrackedTaskStartGate()
+        let task = Task { [weak self] in
+            await startGate.wait()
+            guard !Task.isCancelled else { return }
+            defer { self?.removeBackgroundTask(taskID) }
+            await operation()
+        }
+        taskLock.lock()
+        guard !stopped else {
+            taskLock.unlock()
+            task.cancel()
+            startGate.open()
+            return
+        }
+        backgroundTasks[taskID] = task
+        taskLock.unlock()
+        startGate.open()
+    }
+
+    private func removeBackgroundTask(_ id: UUID) {
+        taskLock.lock()
+        backgroundTasks.removeValue(forKey: id)
+        taskLock.unlock()
     }
 
     private func pushInbound() async {
@@ -1540,6 +1746,7 @@ final class CRMSyncService {
                   let messages = json["messages"] as? [[String: Any]] else { return }
 
             for msg in messages {
+                guard !Task.isCancelled, !isStopped else { return }
                 guard let cmdID = msg["id"] as? String,
                       let phone = msg["phone"] as? String,
                       let text = msg["text"] as? String else { continue }
@@ -1556,9 +1763,12 @@ final class CRMSyncService {
                         crmLog("[CRM] pullOutbound: auto-enabled sync for new contact \(phone)")
                     }
                 }
+                guard !Task.isCancelled, !isStopped else { return }
                 let hint = chatServiceHint?(phone)
+                guard !Task.isCancelled, !isStopped else { return }
                 crmLog("[CRM] pullOutbound: service hint for \(phone) = \(hint ?? "nil")")
                 let preRowID = chatMaxRowID?() ?? 0
+                guard !Task.isCancelled, !isStopped else { return }
                 let result = MessageSender.send(text: text, to: phone, preferredService: hint)
                 let status: String
                 let sendSuccess: Bool
@@ -1606,7 +1816,22 @@ final class CRMSyncService {
         _ = try? await session.data(for: request)
     }
 
-    func syncHistory(chatIdentifier: String, chatDB: ChatDatabase, contactName: String? = nil) async {
+    func startHistorySync(
+        chatIdentifier: String,
+        chatDB: ChatDatabase,
+        contactName: String? = nil
+    ) {
+        launchBackgroundTask { [weak self] in
+            await self?.syncHistory(
+                chatIdentifier: chatIdentifier,
+                chatDB: chatDB,
+                contactName: contactName
+            )
+        }
+    }
+
+    private func syncHistory(chatIdentifier: String, chatDB: ChatDatabase, contactName: String? = nil) async {
+        guard !Task.isCancelled, !isStopped else { return }
         crmLog("[syncHistory] START chatIdentifier=\(chatIdentifier) contact=\(contactName ?? "nil")")
         guard !config.targets.isEmpty else {
             crmLog("[syncHistory] skipped — no sync targets configured")
@@ -1614,6 +1839,7 @@ final class CRMSyncService {
         }
         do {
             let messages = try chatDB.fetchMessages(forChat: chatIdentifier, limit: 10000)
+            guard !Task.isCancelled, !isStopped else { return }
             crmLog("[syncHistory] fetched \(messages.count) messages from chat.db")
             if let first = messages.first, let last = messages.last {
                 let fmt = ISO8601DateFormatter()
@@ -1627,6 +1853,7 @@ final class CRMSyncService {
             crmLog("[syncHistory] sending \(batches.count) batch(es)")
 
             for (batchIdx, batch) in batches.enumerated() {
+                guard !Task.isCancelled, !isStopped else { return }
                 let payload = batch.map { msg -> [String: Any] in
                     var m: [String: Any] = ["id": msg.guid, "phone": msg.senderID ?? chatIdentifier,
                      "text": msg.displayText ?? "", "timestamp": ISO8601DateFormatter().string(from: msg.date),
@@ -1653,6 +1880,7 @@ final class CRMSyncService {
                 // the SAME derived-targets basis pushInbound uses: gate/
                 // outbound and content always address the same backend(s).
                 for target in config.targets {
+                    guard !Task.isCancelled, !isStopped else { return }
                     guard let url = targetURL(target, path: "/sync/\(chatIdentifier)/history") else {
                         crmLog("[syncHistory] \(target.name): invalid URL")
                         continue
@@ -1661,6 +1889,7 @@ final class CRMSyncService {
                         crmLog("[syncHistory] \(target.name): skipped — signed out and no legacy key")
                         continue
                     }
+                    guard !Task.isCancelled, !isStopped else { return }
                     let request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
                     do {
                         let (data, response) = try await session.data(for: request)

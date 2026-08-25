@@ -170,6 +170,17 @@ protocol TokenStore {
     func save(_ tokenSet: TokenSet) async throws
     func load() async throws -> TokenSet?
     func clear() async throws
+    /// Atomically remove credentials only when they are still the exact
+    /// token set supplied by this caller. This prevents a stale operation
+    /// from deleting a newer session while recovering from a late write.
+    func clear(ifMatching tokenSet: TokenSet) async throws
+}
+
+extension TokenStore {
+    func clear(ifMatching tokenSet: TokenSet) async throws {
+        guard try await load() == tokenSet else { return }
+        try await clear()
+    }
 }
 
 /// Test-only (and safe-default) token store: never touches the system
@@ -182,14 +193,18 @@ actor InMemoryTokenStore: TokenStore {
     func save(_ tokenSet: TokenSet) async throws { stored = tokenSet }
     func load() async throws -> TokenSet? { stored }
     func clear() async throws { stored = nil }
+    func clear(ifMatching tokenSet: TokenSet) async throws {
+        if stored == tokenSet { stored = nil }
+    }
 }
 
 // MARK: - Loopback callback parsing
 
-enum LoopbackCallbackError: Error {
+enum LoopbackCallbackError: Error, Equatable {
     case malformedRequestLine
     case stateMismatch
     case missingCode
+    case authorizationDenied(description: String?)
 }
 
 /// Pure parser for the loopback listener's raw HTTP request line
@@ -209,10 +224,44 @@ enum LoopbackCallback {
         guard let state = value("state"), state == expectedState else {
             throw LoopbackCallbackError.stateMismatch
         }
-        guard let code = value("code") else {
+        if let oauthError = value("error") {
+            throw LoopbackCallbackError.authorizationDenied(
+                description: value("error_description") ?? oauthError
+            )
+        }
+        guard let code = value("code"), !code.isEmpty else {
             throw LoopbackCallbackError.missingCode
         }
         return code
+    }
+}
+
+enum BrowserCallbackOutcome: Equatable, Sendable {
+    case success
+    case failure(String)
+}
+
+/// Pure HTTP response builder kept separate from NWConnection so tests can
+/// pin the browser's success/failure language without opening a real socket.
+enum BrowserCallbackResponse {
+    static func httpData(for outcome: BrowserCallbackOutcome) -> Data {
+        let title: String
+        let detail: String
+        switch outcome {
+        case .success:
+            title = "Phone Sync is signed in"
+            detail = "Authentication completed and your session was securely saved. You can close this window."
+        case .failure(let message):
+            title = "Phone Sync sign-in failed"
+            detail = message
+        }
+        let html = """
+        <html><head><meta charset="utf-8"><title>\(title)</title></head>
+        <body><h1>\(title)</h1><p>\(detail)</p></body></html>
+        """
+        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+            + "Content-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
+        return response.data(using: .utf8)!
     }
 }
 
@@ -239,6 +288,22 @@ private final class OneShotLatch: @unchecked Sendable {
     }
 }
 
+private final class ConnectionReceiveDeadline: @unchecked Sendable {
+    private let workItem: DispatchWorkItem
+
+    init(connection: NWConnection) {
+        workItem = DispatchWorkItem { connection.cancel() }
+    }
+
+    func schedule() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: workItem)
+    }
+
+    func cancel() {
+        workItem.cancel()
+    }
+}
+
 /// Coordinates the loopback callback's single completion across (a) many
 /// possibly-concurrent inbound connections — only the first one whose
 /// request line `LoopbackCallback.parse` accepts should resume, every other
@@ -248,28 +313,39 @@ private final class OneShotLatch: @unchecked Sendable {
 /// from a different queue. All access goes through one lock so exactly one
 /// of "resume with a code" / "cancel" wins, no matter which arrives first
 /// or from which thread.
+private struct PendingCallback: @unchecked Sendable {
+    let code: String
+    let connection: NWConnection
+}
+
 private final class CallbackCompletion: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<String, Error>?
+    private var continuation: CheckedContinuation<PendingCallback, Error>?
     private var finished = false
     // A code that arrived BEFORE any continuation attached. The handler is
     // armed before the browser opens (so no callback can be missed), which
     // means an instantly-redirecting IdP session can legitimately deliver
     // the code before signIn() gets around to awaiting it — buffer it
     // rather than dropping it.
-    private var bufferedCode: String?
+    private var bufferedResult: Result<PendingCallback, Error>?
+    // The callback socket remains owned here until signIn() explicitly
+    // claims it. This covers the task-group boundary where the callback
+    // child may finish at the same instant that timeout/cancellation wins
+    // group.next(); in that case its returned value is discarded, but the
+    // connection is still available for the signIn() defer to close.
+    private var unclaimedCallback: PendingCallback?
 
     /// Stores the continuation this instance will resume exactly once. If
     /// the code already arrived (instant-redirect race), resumes with it
     /// right away; if `cancel()` already fired, resumes immediately with a
     /// `CancellationError` instead of waiting on a socket event a cancelled
     /// sign-in no longer cares about.
-    func attach(_ continuation: CheckedContinuation<String, Error>) {
+    func attach(_ continuation: CheckedContinuation<PendingCallback, Error>) {
         lock.lock()
-        if let code = bufferedCode {
-            bufferedCode = nil
+        if let result = bufferedResult {
+            bufferedResult = nil
             lock.unlock()
-            continuation.resume(returning: code)
+            continuation.resume(with: result)
             return
         }
         if finished {
@@ -285,17 +361,49 @@ private final class CallbackCompletion: @unchecked Sendable {
     /// code, unless another connection (or a cancellation) already won.
     /// With no continuation attached yet, the code is buffered for the
     /// upcoming `attach`.
-    func succeed(with code: String) {
+    @discardableResult
+    func succeed(with callback: PendingCallback) -> Bool {
+        lock.lock()
+        guard !finished else { lock.unlock(); return false }
+        finished = true
+        unclaimedCallback = callback
+        let pending = continuation
+        continuation = nil
+        if pending == nil {
+            bufferedResult = .success(callback)
+        }
+        lock.unlock()
+        pending?.resume(returning: callback)
+        return true
+    }
+
+    func claim(_ callback: PendingCallback) {
+        lock.lock()
+        if unclaimedCallback?.connection === callback.connection {
+            unclaimedCallback = nil
+        }
+        lock.unlock()
+    }
+
+    func drainUnclaimedCallback() -> PendingCallback? {
+        lock.lock()
+        let callback = unclaimedCallback
+        unclaimedCallback = nil
+        lock.unlock()
+        return callback
+    }
+
+    func fail(with error: Error) {
         lock.lock()
         guard !finished else { lock.unlock(); return }
         finished = true
         let pending = continuation
         continuation = nil
         if pending == nil {
-            bufferedCode = code
+            bufferedResult = .failure(error)
         }
         lock.unlock()
-        pending?.resume(returning: code)
+        pending?.resume(throwing: error)
     }
 
     func cancel() {
@@ -311,11 +419,13 @@ private final class CallbackCompletion: @unchecked Sendable {
 
 // MARK: - AuthService
 
-actor AuthService {
+actor AuthService: AuthSessionClient {
     enum AuthError: Error, LocalizedError {
         case signedOut
         case noBindablePort(detail: String)
         case invalidCallback
+        case authorizationCancelled
+        case sessionValidationFailed(statusCode: Int)
         case tokenExchangeFailed
         case signInTimedOut
 
@@ -330,6 +440,10 @@ actor AuthService {
                 return "Could not open a local sign-in listener — \(detail)"
             case .invalidCallback:
                 return "The browser sign-in did not complete (bad callback)."
+            case .authorizationCancelled:
+                return "Sign-in was cancelled in the browser."
+            case .sessionValidationFailed(let statusCode):
+                return "Moon Five could not validate the saved session (HTTP \(statusCode))."
             case .tokenExchangeFailed:
                 return "Moon Five rejected the sign-in code exchange."
             case .signInTimedOut:
@@ -341,14 +455,17 @@ actor AuthService {
     private let config: OIDCConfiguration
     private let tokenStore: TokenStore
     private let transport: (URLRequest) async throws -> (Data, HTTPURLResponse)
+    private let allowsLegacyCredentials: Bool
 
     init(
         config: OIDCConfiguration = .production,
         tokenStore: TokenStore = KeychainTokenStore(),
+        allowsLegacyCredentials: Bool = false,
         transport: @escaping (URLRequest) async throws -> (Data, HTTPURLResponse) = AuthService.urlSessionTransport
     ) {
         self.config = config
         self.tokenStore = tokenStore
+        self.allowsLegacyCredentials = allowsLegacyCredentials
         self.transport = transport
     }
 
@@ -377,13 +494,19 @@ actor AuthService {
     /// refresh token itself is dead; the store is cleared so the caller's
     /// next attempt has to go through `signIn()` again).
     func validAccessToken() async throws -> String {
+        let expectedEpoch = credentialEpoch
+        guard !requiresFreshSignIn else { throw AuthError.signedOut }
         guard let tokenSet = try await tokenStore.load() else {
             throw AuthError.signedOut
         }
+        guard credentialEpoch == expectedEpoch else { throw AuthError.signedOut }
         guard TokenRefreshPolicy.shouldRefresh(tokenSet, now: Date()) else {
             return tokenSet.accessToken
         }
-        let refreshed = try await refreshSingleFlight(currentRefreshToken: tokenSet.refreshToken)
+        let refreshed = try await refreshSingleFlight(
+            currentTokenSet: tokenSet,
+            credentialEpoch: expectedEpoch
+        )
         return refreshed.accessToken
     }
 
@@ -396,9 +519,19 @@ actor AuthService {
     /// every one of those callers into a surprise sign-out. Coalescing
     /// every concurrent caller onto the ONE Task<TokenSet, Error> here
     /// fixes that.
-    private var inFlightRefresh: Task<TokenSet, Error>?
+    private var credentialEpoch: UInt64 = 0
+    /// Set when Keychain cleanup fails. While latched, no retained token may
+    /// validate back into a session; only a newly completed authorization
+    /// code flow clears it after persisting fresh credentials.
+    private var requiresFreshSignIn = false
+    private var inFlightRefresh: (id: UUID, task: Task<TokenSet, Error>)?
 
-    private func refreshSingleFlight(currentRefreshToken: String) async throws -> TokenSet {
+    private func refreshSingleFlight(
+        currentTokenSet: TokenSet,
+        credentialEpoch expectedEpoch: UInt64
+    ) async throws -> TokenSet {
+        guard credentialEpoch == expectedEpoch else { throw AuthError.signedOut }
+        let currentRefreshToken = currentTokenSet.refreshToken
         // Re-check the store first: a concurrent caller may have ALREADY
         // refreshed (and cleared the in-flight slot below) between this
         // caller's own stale-token snapshot and this call — reusing that
@@ -408,25 +541,39 @@ actor AuthService {
         // caller started with, someone else already won; just hand back
         // what they got.
         if let current = try await tokenStore.load(), current.refreshToken != currentRefreshToken {
+            guard credentialEpoch == expectedEpoch else { throw AuthError.signedOut }
             return current
         }
+        guard credentialEpoch == expectedEpoch else { throw AuthError.signedOut }
 
-        if let inFlight = inFlightRefresh {
-            return try await inFlight.value
+        if let inFlightRefresh {
+            return try await inFlightRefresh.task.value
         }
 
+        let id = UUID()
         let task = Task<TokenSet, Error> {
-            try await self.performRefresh(currentRefreshToken: currentRefreshToken)
+            try await self.performRefresh(
+                currentTokenSet: currentTokenSet,
+                credentialEpoch: expectedEpoch
+            )
         }
-        inFlightRefresh = task
+        inFlightRefresh = (id, task)
         // Cleared in `defer`, whichever way the POST turns out — a stuck
         // slot here would wedge every future refresh behind one that
         // already finished.
-        defer { inFlightRefresh = nil }
+        defer {
+            if inFlightRefresh?.id == id {
+                inFlightRefresh = nil
+            }
+        }
         return try await task.value
     }
 
-    private func performRefresh(currentRefreshToken: String) async throws -> TokenSet {
+    private func performRefresh(
+        currentTokenSet: TokenSet,
+        credentialEpoch expectedEpoch: UInt64
+    ) async throws -> TokenSet {
+        let currentRefreshToken = currentTokenSet.refreshToken
         var request = URLRequest(url: config.issuer.appendingPathComponent("token"))
         request.httpMethod = "POST"
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
@@ -437,49 +584,72 @@ actor AuthService {
         ]).data(using: .utf8)
 
         let (data, response) = try await transport(request)
+        try Task.checkCancellation()
+        guard credentialEpoch == expectedEpoch else { throw AuthError.signedOut }
         guard response.statusCode == 200 else {
             if response.statusCode == 401 {
                 // The refresh token itself is dead — force a real re-sign-in
                 // rather than retrying forever against a token that will
                 // never work again.
-                try? await tokenStore.clear()
+                try? await tokenStore.clear(ifMatching: currentTokenSet)
+                throw AuthError.signedOut
             }
-            throw AuthError.signedOut
+            throw AuthError.sessionValidationFailed(statusCode: response.statusCode)
         }
         let refreshed = try TokenSet(
             tokenEndpointJSON: data, now: Date(), previousRefreshToken: currentRefreshToken
         )
+        try Task.checkCancellation()
+        guard credentialEpoch == expectedEpoch else { throw AuthError.signedOut }
         try await tokenStore.save(refreshed)
+        // TokenStore is an actor-shaped async dependency. Sign Out can run
+        // while save is suspended, so check again and remove only this late
+        // write. A newer sign-in may already have replaced it.
+        guard credentialEpoch == expectedEpoch else {
+            try? await tokenStore.clear(ifMatching: refreshed)
+            throw AuthError.signedOut
+        }
         return refreshed
     }
 
     // MARK: Per-target credential resolution
 
-    /// Resolves the Authorization header value for ONE sync target: this
-    /// service's OIDC Bearer token when signed in — the SAME token for
-    /// every target, since one IdP is trusted everywhere — or, while
-    /// signed out, that target's OWN legacy API key (`SyncTarget.
-    /// legacyKey`) ONLY. Returns nil to mean "skip this target for this
-    /// call": signed out AND this target has no legacy key of its own.
-    /// Never falls back to ANOTHER target's key — that's exactly the
-    /// split-brain bug this method exists to prevent (a legacy prod key
-    /// must never reach a staging target's URL, or vice versa). Shared by
-    /// CRMSyncService (its per-poll wire calls) and ForwardSheet (the
-    /// team-forward UI) so both go through the same resolution rule.
+    /// Resolves the Authorization header value for one sync target. The
+    /// production shared service requires a validated OIDC token and never
+    /// falls back while the user is signed out. The opt-in legacy policy is
+    /// reserved for isolated compatibility/test clients that are never wired
+    /// to AppState or user-facing views.
     func authorizationHeaderValue(for target: SyncTarget) async -> String? {
         if let token = try? await validAccessToken() {
             return "Bearer \(token)"
         }
+        guard allowsLegacyCredentials else { return nil }
         guard let legacyKey = target.legacyKey, !legacyKey.isEmpty else { return nil }
+        return "Bearer \(legacyKey)"
+    }
+
+    func authorizationHeaderValue(legacyKey: String) async -> String? {
+        if let token = try? await validAccessToken() {
+            return "Bearer \(token)"
+        }
+        guard allowsLegacyCredentials, !legacyKey.isEmpty else { return nil }
         return "Bearer \(legacyKey)"
     }
 
     // MARK: Sign in / out
 
-    /// True once a token is on file — cheap local check, no refresh, no
-    /// network; used by the UI to render signed-in vs signed-out state.
+    /// Validates the actual usable session: a fresh stored token is accepted,
+    /// while a stale token must refresh successfully before this returns.
+    func validatedSession() async throws -> AuthenticatedSession {
+        let accessToken = try await validAccessToken()
+        return AuthenticatedSession(email: Self.emailClaim(fromJWT: accessToken))
+    }
+
+    /// Compatibility convenience for existing setup/settings code. Unlike
+    /// the old implementation this performs full validation/refresh and can
+    /// never equate "some Keychain bytes exist" with authenticated state.
     func isSignedIn() async -> Bool {
-        (try? await tokenStore.load()) != nil
+        (try? await validatedSession()) != nil
     }
 
     /// Best-effort `email` claim from the stored access token's JWT
@@ -488,12 +658,20 @@ actor AuthService {
     /// without an email claim); callers fall back to just showing
     /// signed-in state.
     func signedInEmail() async -> String? {
-        guard let tokenSet = try? await tokenStore.load() else { return nil }
-        return Self.emailClaim(fromJWT: tokenSet.accessToken)
+        (try? await validatedSession())?.email
     }
 
-    func signOut() async {
-        try? await tokenStore.clear()
+    func signOut() async throws {
+        credentialEpoch &+= 1
+        inFlightRefresh?.task.cancel()
+        inFlightRefresh = nil
+        do {
+            try await tokenStore.clear()
+            requiresFreshSignIn = false
+        } catch {
+            requiresFreshSignIn = true
+            throw error
+        }
     }
 
     /// A sign-in attempt gives up after this long — an abandoned browser
@@ -536,15 +714,65 @@ actor AuthService {
         // ordering guarantee, so this is a plain synchronous call). A code
         // that lands before the await below is buffered by the completion.
         let completion = Self.armCallbackHandler(on: listener, expectedState: state)
+        defer {
+            if let callback = completion.drainUnclaimedCallback() {
+                Self.sendBrowserOutcome(
+                    .failure("This sign-in attempt is no longer active."),
+                    on: callback.connection
+                )
+            }
+        }
 
         let opened = await MainActor.run { NSWorkspace.shared.open(authorizeURL) }
         guard opened else { throw AuthError.invalidCallback }
 
-        let code = try await Self.awaitCallbackWithTimeout(completion, listener: listener)
+        let callback = try await Self.awaitCallbackWithTimeout(completion, listener: listener)
+        completion.claim(callback)
 
         let redirectURI = "http://127.0.0.1:\(port)/callback"
-        let tokenSet = try await exchangeCode(code: code, codeVerifier: verifier, redirectURI: redirectURI)
-        try await tokenStore.save(tokenSet)
+        try await completeSignIn(
+            code: callback.code,
+            codeVerifier: verifier,
+            redirectURI: redirectURI
+        ) { outcome in
+            await Self.sendBrowserOutcomeAndWait(outcome, on: callback.connection)
+        }
+    }
+
+    /// Completes the callback transaction in the only safe order: exchange
+    /// the code, persist the resulting TokenSet, and only then tell the
+    /// browser that sign-in succeeded. Any exchange/persistence/cancellation
+    /// error receives an explicit failure page and leaves the caller locked.
+    func completeSignIn(
+        code: String,
+        codeVerifier: String,
+        redirectURI: String,
+        browserResponder: @escaping @Sendable (BrowserCallbackOutcome) async -> Void
+    ) async throws {
+        let expectedEpoch = credentialEpoch
+        do {
+            let tokenSet = try await exchangeCode(
+                code: code, codeVerifier: codeVerifier, redirectURI: redirectURI
+            )
+            try Task.checkCancellation()
+            guard credentialEpoch == expectedEpoch else { throw AuthError.signedOut }
+            try await tokenStore.save(tokenSet)
+            guard credentialEpoch == expectedEpoch else {
+                try? await tokenStore.clear(ifMatching: tokenSet)
+                throw AuthError.signedOut
+            }
+            requiresFreshSignIn = false
+            await browserResponder(.success)
+        } catch {
+            let message: String
+            if error is CancellationError {
+                message = "Sign-in was cancelled before the session could be saved."
+            } else {
+                message = "Authentication could not be completed. Return to Phone Sync and try again."
+            }
+            await browserResponder(.failure(message))
+            throw error
+        }
     }
 
     private func exchangeCode(code: String, codeVerifier: String, redirectURI: String) async throws -> TokenSet {
@@ -679,8 +907,8 @@ actor AuthService {
     /// cancels its sibling) tears down the socket side cleanly.
     private static func awaitCallbackWithTimeout(
         _ completion: CallbackCompletion, listener: NWListener
-    ) async throws -> String {
-        try await withThrowingTaskGroup(of: String.self) { group in
+    ) async throws -> PendingCallback {
+        try await withThrowingTaskGroup(of: PendingCallback.self) { group in
             group.addTask {
                 try await awaitArmedCallback(completion, listener: listener)
             }
@@ -698,10 +926,11 @@ actor AuthService {
 
     /// Accepts inbound loopback connections until ONE produces a request
     /// line `LoopbackCallback.parse` accepts (the real OIDC redirect,
-    /// matching `expectedState`) — replies with the "you're signed in"
-    /// page and resolves with its `code`. Any other connection (malformed
-    /// read, wrong/missing state, no code — e.g. a stray browser probe) is
-    /// closed without resuming; the wait continues for the real one.
+    /// matching `expectedState`) and resolves with both its code and the
+    /// still-open browser connection. Success is deliberately NOT rendered
+    /// here; `completeSignIn` owns that only after exchange + persistence.
+    /// Invalid callbacks receive a clear failure page without ever exposing
+    /// application content.
     /// Cancellation (the timeout race above, or the UI's Cancel button via
     /// the enclosing Task) tears the listener down and resumes with a
     /// `CancellationError` through the SAME `CallbackCompletion`, so a
@@ -736,34 +965,59 @@ actor AuthService {
                     // not outlive the sign-in: give it a hard deadline
                     // (idempotent — cancel on a finished connection is a
                     // no-op). Codex P3.
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
-                        connection.cancel()
-                    }
+                    let receiveDeadline = ConnectionReceiveDeadline(connection: connection)
+                    receiveDeadline.schedule()
                     connection.stateUpdateHandler = { state in
                         guard case .ready = state else { return }
                         connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, error in
                             guard let data, let text = String(data: data, encoding: .utf8),
-                                  let firstLine = text.split(separator: "\r\n", maxSplits: 1).first,
-                                  let code = try? LoopbackCallback.parse(
-                                      requestLine: String(firstLine), expectedState: expectedState
-                                  ) else {
-                                // Not the real callback — a stray
-                                // connection, not a failure: close it and
-                                // keep waiting for the real one.
+                                  let firstLine = text.split(separator: "\r\n", maxSplits: 1).first else {
                                 connection.cancel()
                                 return
                             }
-                            // charset is load-bearing: without it browsers
-                            // decode this UTF-8 body as Latin-1 and the em
-                            // dash renders as mojibake ("â€”").
-                            let html = "<html><meta charset=\"utf-8\"><body>You're signed in — close this window.</body></html>"
-                            let responseText = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
-                                + "Content-Length: \(html.utf8.count)\r\nConnection: close\r\n\r\n\(html)"
-                            connection.send(
-                                content: responseText.data(using: .utf8),
-                                completion: .contentProcessed { _ in connection.cancel() }
-                            )
-                            completion.succeed(with: code)
+                            do {
+                                let code = try LoopbackCallback.parse(
+                                    requestLine: String(firstLine), expectedState: expectedState
+                                )
+                                // The request arrived. Ownership moves to
+                                // completeSignIn only if this callback wins
+                                // the completion race. A timeout/cancel may
+                                // already have finished the attempt; close
+                                // this accepted socket explicitly in that
+                                // losing branch so the browser never spins on
+                                // an orphaned connection.
+                                if completion.succeed(
+                                    with: PendingCallback(code: code, connection: connection)
+                                ) {
+                                    receiveDeadline.cancel()
+                                } else {
+                                    receiveDeadline.cancel()
+                                    Self.sendBrowserOutcome(
+                                        .failure("This sign-in attempt is no longer active."),
+                                        on: connection
+                                    )
+                                }
+                            } catch LoopbackCallbackError.authorizationDenied {
+                                receiveDeadline.cancel()
+                                Self.sendBrowserOutcome(
+                                    .failure("Sign-in was cancelled or denied in the browser."),
+                                    on: connection
+                                )
+                                completion.fail(with: AuthError.authorizationCancelled)
+                            } catch LoopbackCallbackError.missingCode {
+                                receiveDeadline.cancel()
+                                Self.sendBrowserOutcome(
+                                    .failure("The authorization callback did not include a sign-in code."),
+                                    on: connection
+                                )
+                                completion.fail(with: AuthError.invalidCallback)
+                            } catch {
+                                receiveDeadline.cancel()
+                                Self.sendBrowserOutcome(
+                                    .failure("This callback is invalid or no longer matches the active sign-in."),
+                                    on: connection
+                                )
+                            }
                         }
                     }
                     connection.start(queue: .main)
@@ -778,14 +1032,35 @@ actor AuthService {
     /// never double-resume after a cancellation already won.
     private static func awaitArmedCallback(
         _ completion: CallbackCompletion, listener: NWListener
-    ) async throws -> String {
+    ) async throws -> PendingCallback {
         try await withTaskCancellationHandler(operation: {
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<PendingCallback, Error>) in
                 completion.attach(continuation)
             }
         }, onCancel: {
             listener.cancel()
             completion.cancel()
         })
+    }
+
+    private static func sendBrowserOutcome(_ outcome: BrowserCallbackOutcome, on connection: NWConnection) {
+        connection.send(
+            content: BrowserCallbackResponse.httpData(for: outcome),
+            completion: .contentProcessed { _ in connection.cancel() }
+        )
+    }
+
+    private static func sendBrowserOutcomeAndWait(
+        _ outcome: BrowserCallbackOutcome, on connection: NWConnection
+    ) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            connection.send(
+                content: BrowserCallbackResponse.httpData(for: outcome),
+                completion: .contentProcessed { _ in
+                    connection.cancel()
+                    continuation.resume()
+                }
+            )
+        }
     }
 }

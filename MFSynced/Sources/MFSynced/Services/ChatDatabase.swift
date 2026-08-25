@@ -8,7 +8,10 @@ import SQLite3
 // lookup returned nil for a row that exists.
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-final class ChatDatabase {
+/// Thread-safe by construction: `path` is immutable and every query opens,
+/// uses, and closes its own read-only SQLite connection. No sqlite handle or
+/// mutable query state is shared between calls.
+final class ChatDatabase: @unchecked Sendable {
     private let path: String
 
     init(path: String? = nil) {

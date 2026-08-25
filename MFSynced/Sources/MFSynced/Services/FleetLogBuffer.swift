@@ -63,6 +63,12 @@ final class FleetLogBuffer {
         }
     }
 
+    func purge() {
+        lock.lock()
+        entries.removeAll(keepingCapacity: false)
+        lock.unlock()
+    }
+
     var count: Int {
         lock.lock()
         defer { lock.unlock() }
