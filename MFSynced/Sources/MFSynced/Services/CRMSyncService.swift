@@ -295,11 +295,23 @@ final class CRMSyncService {
     /// re-fetching it from scratch again would be redundant work, not a
     /// correctness fix. Internal (not private) for test visibility.
     var backfilledThisSession = Set<String>()
-    private var pollTimer: Timer?
     private let taskLock = NSLock()
-    private var pollTask: Task<Void, Never>?
+    private var pollLoopTask: Task<Void, Never>?
+    private var pollLoopID: UUID?
     private var heartbeatTask: Task<Void, Never>?
     private var retiringHeartbeatTask: Task<Void, Never>?
+    /// Test seams for the dedicated sync loop. Production leaves both nil
+    /// and uses poll plus Task.sleep. Keeping the sync cadence off the main
+    /// run loop is essential: a large SwiftUI conversation list can keep the
+    /// main thread busy laying out rows, but must never pause inbound,
+    /// outbound, catalog, or staged synchronization.
+    var pollAttemptOverride: (@Sendable () async -> Void)?
+    var pollSleepOverride: (@Sendable (UInt64) async throws -> Void)?
+    static let defaultPollIntervalSeconds: TimeInterval = 5
+    // A persisted zero or negative value must not turn the full CRM poll
+    // (database scans plus several network requests) into a hot loop.
+    static let minimumPollIntervalSeconds: TimeInterval = 1
+    static let maximumPollIntervalSeconds: TimeInterval = 3_600
     /// Test seams for the dedicated liveness loop. Production leaves both
     /// nil and uses sendHeartbeat plus Task.sleep.
     var heartbeatAttemptOverride: (@Sendable () async -> Void)?
@@ -312,10 +324,8 @@ final class CRMSyncService {
     /// and stop use the same lock so nothing can escape sign-out cleanup.
     private var backgroundTasks: [UUID: Task<Void, Never>] = [:]
     private var stopped = false
-    /// Main-thread only (timer closure + main-actor reset).
-    private var pollInFlight = false
     /// Staging has a second caller through ControlServer's localhost /poll
-    /// endpoint, so the timer and control paths can reach uploadStaged at the
+    /// endpoint, so the async loop and control paths can reach uploadStaged at the
     /// same time. The guard and rotation cursor share this lock: one caller
     /// reserves the staging pass, and only actual incremental probes advance
     /// the per-agent cursor.
@@ -398,7 +408,7 @@ final class CRMSyncService {
     func startHeartbeatLoop() {
         let startGate = TrackedTaskStartGate()
         taskLock.lock()
-        guard heartbeatTask == nil else {
+        guard !stopped, heartbeatTask == nil else {
             taskLock.unlock()
             return
         }
@@ -468,54 +478,99 @@ final class CRMSyncService {
     }
 
     func startPolling() {
-        // `stopped` blocks every tracked background operation, including a
-        // user-requested history sync. Clear it before the automatic-polling
-        // configuration guard: CRM can be disabled while manual forwarding
-        // and history sync remain valid authenticated actions.
-        taskLock.lock()
-        stopped = false
-        taskLock.unlock()
         // Endpoint availability checks agentEndpoint (not the raw legacy
         // apiEndpoint field): a sign-in-only install never populates
         // apiEndpoint at all, but always has a non-empty sync target to
         // fall back to.
         guard config.isEnabled, !agentEndpoint.isEmpty else {
+            // `stopped` also blocks user-requested history sync. Automatic
+            // CRM polling may be disabled while signed-in manual actions
+            // remain valid, so reopen that latch without creating loops.
+            taskLock.lock()
+            stopped = false
+            taskLock.unlock()
             crmLog("[CRM] startPolling: skipped — isEnabled=\(config.isEnabled) endpoint='\(agentEndpoint)'")
             return
         }
-        startHeartbeatLoop()
-        crmLog("[CRM] startPolling: starting timer every \(config.pollIntervalSeconds)s → \(agentEndpoint)")
-        pollTimer?.invalidate()
-        pollTimer = Timer.scheduledTimer(withTimeInterval: config.pollIntervalSeconds, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            // One tick at a time: the timer fires on the main run loop, and
-            // pollInFlight is only touched here and in the main-actor reset
-            // below, so a slow network can delay ticks but never overlap
-            // two poll() tasks racing the same state.
-            guard !self.pollInFlight else {
-                crmLog("[CRM] timer fired — previous poll still running, skipping tick")
-                return
-            }
-            self.pollInFlight = true
-            crmLog("[CRM] timer fired")
-            let task = Task {
-                await self.poll()
-                await MainActor.run { self.pollInFlight = false }
-            }
-            self.taskLock.lock()
-            self.pollTask = task
-            self.taskLock.unlock()
+        let startGate = TrackedTaskStartGate()
+        let loopID = UUID()
+
+        // Clearing the stop latch and publishing the task are one lifecycle
+        // transition. A concurrent stop therefore either wins before this
+        // lock (and this call is the later restart) or wins after it (and
+        // cancels/removes this exact task); it cannot leave a dead task
+        // registered behind pollLoopTask != nil.
+        taskLock.lock()
+        stopped = false
+        guard pollLoopTask == nil else {
+            taskLock.unlock()
+            return
         }
+        let task = Task.detached { [weak self] in
+            await startGate.wait()
+            guard let self else { return }
+            defer { self.clearPollLoop(ifMatching: loopID) }
+            while !Task.isCancelled, !self.isStopped {
+                let intervalNanoseconds = Self.pollIntervalNanoseconds(
+                    seconds: self.config.pollIntervalSeconds
+                )
+                do {
+                    if let sleep = self.pollSleepOverride {
+                        try await sleep(intervalNanoseconds)
+                    } else {
+                        try await Task.sleep(nanoseconds: intervalNanoseconds)
+                    }
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled, !self.isStopped else { return }
+                crmLog("[CRM] sync interval fired")
+                if let attempt = self.pollAttemptOverride {
+                    await attempt()
+                } else {
+                    await self.poll()
+                }
+            }
+        }
+        pollLoopTask = task
+        pollLoopID = loopID
+        taskLock.unlock()
+        startGate.open()
+        startHeartbeatLoop()
+        crmLog(
+            "[CRM] startPolling: starting async loop every "
+            + "\(Self.sanitizedPollIntervalSeconds(config.pollIntervalSeconds))s → \(agentEndpoint)"
+        )
+    }
+
+    /// Converts the persisted/user-entered interval into a safe Task.sleep
+    /// duration. A malformed or non-finite value falls back to the product
+    /// default; finite values are clamped to avoid both a hot loop and a
+    /// trapping Double-to-UInt64 conversion.
+    static func sanitizedPollIntervalSeconds(_ seconds: TimeInterval) -> TimeInterval {
+        guard seconds.isFinite else { return defaultPollIntervalSeconds }
+        return min(max(seconds, minimumPollIntervalSeconds), maximumPollIntervalSeconds)
+    }
+
+    static func pollIntervalNanoseconds(seconds: TimeInterval) -> UInt64 {
+        UInt64(sanitizedPollIntervalSeconds(seconds) * 1_000_000_000)
+    }
+
+    private func clearPollLoop(ifMatching loopID: UUID) {
+        taskLock.lock()
+        if pollLoopID == loopID {
+            pollLoopTask = nil
+            pollLoopID = nil
+        }
+        taskLock.unlock()
     }
 
     func stopPolling() {
-        pollTimer?.invalidate()
-        pollTimer = nil
-        pollInFlight = false
         taskLock.lock()
         stopped = true
-        let pollTask = self.pollTask
-        self.pollTask = nil
+        let pollLoopTask = self.pollLoopTask
+        self.pollLoopTask = nil
+        pollLoopID = nil
         let heartbeatTask = self.heartbeatTask
         self.heartbeatTask = nil
         if let heartbeatTask {
@@ -524,7 +579,7 @@ final class CRMSyncService {
         let backgroundTasks = Array(self.backgroundTasks.values)
         self.backgroundTasks.removeAll()
         taskLock.unlock()
-        pollTask?.cancel()
+        pollLoopTask?.cancel()
         heartbeatTask?.cancel()
         backgroundTasks.forEach { $0.cancel() }
     }
@@ -904,7 +959,9 @@ final class CRMSyncService {
             "agent_id": config.agentID,
             "hostname": hostname,
             "os_version": osVersion,
-            "poll_interval_seconds": max(1, Int(config.pollIntervalSeconds)),
+            "poll_interval_seconds": max(
+                1, Int(ceil(sanitizedPollIntervalSeconds(config.pollIntervalSeconds)))
+            ),
             "uptime_seconds": max(0, uptimeSeconds),
             "gate_applied": Array(config.syncedPhoneNumbers).sorted(),
         ]
