@@ -100,6 +100,39 @@ final class SyncQueueDatabaseTests: XCTestCase {
         XCTAssertEqual(all["+1666"]?.backfillDone, false)
     }
 
+    func testResetAllStagedCursorsKeepsOtherQueueState() throws {
+        try db.setStagedCursor(
+            chatIdentifier: "+1555", lastRowID: 5, oldestRowID: 1,
+            backfilledCount: 5, backfillDone: true
+        )
+        try db.setState(key: "unrelated", value: "kept")
+
+        try db.resetAllStagedCursors()
+
+        XCTAssertTrue(try db.allStagedCursors().isEmpty)
+        XCTAssertEqual(try db.getState(key: "unrelated"), "kept")
+    }
+
+    func testPrepareReactionBackfillResetsAndMarksExactlyOnce() throws {
+        try db.setStagedCursor(
+            chatIdentifier: "+1555", lastRowID: 5, oldestRowID: 1,
+            backfilledCount: 5, backfillDone: true
+        )
+        try db.setState(key: "unrelated", value: "kept")
+
+        XCTAssertTrue(try db.prepareReactionBackfill(markerKey: "reaction-repair"))
+        XCTAssertTrue(try db.allStagedCursors().isEmpty)
+        XCTAssertEqual(try db.getState(key: "reaction-repair"), "1")
+
+        try db.setStagedCursor(
+            chatIdentifier: "+1666", lastRowID: 9, oldestRowID: 1,
+            backfilledCount: 9, backfillDone: true
+        )
+        XCTAssertFalse(try db.prepareReactionBackfill(markerKey: "reaction-repair"))
+        XCTAssertEqual(try db.stagedCursor(for: "+1666")?.lastRowID, 9)
+        XCTAssertEqual(try db.getState(key: "unrelated"), "kept")
+    }
+
     // MARK: - kv_state (S5 — contact-updates poll cursor)
 
     func testGetStateMissingByDefault() throws {

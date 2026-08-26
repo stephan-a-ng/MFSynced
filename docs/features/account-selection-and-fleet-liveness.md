@@ -42,3 +42,7 @@ without depending on catalog order.
 Cursor advancement remains confirmation-gated: message row cursors move only
 for GUIDs confirmed by the server. The rotation cursor records query fairness,
 not delivery success, and is kept in memory per agent.
+
+Tapback rows now consume the same bounded row/query budget but travel as
+reaction events, not message bodies. See
+[`reviewer-history-and-inbound-reactions.md`](reviewer-history-and-inbound-reactions.md).

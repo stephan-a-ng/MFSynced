@@ -50,7 +50,9 @@ final class CRMSyncStagedTests: XCTestCase {
         isFromMe: Bool = false,
         date: Date = Date(timeIntervalSince1970: 1_700_000_000),
         senderID: String? = "+15551234567",
-        chatIdentifier: String? = "+15551234567"
+        chatIdentifier: String? = "+15551234567",
+        associatedMessageType: Int = 0,
+        associatedMessageGUID: String? = nil
     ) -> Message {
         Message(
             id: id,
@@ -60,8 +62,9 @@ final class CRMSyncStagedTests: XCTestCase {
             isFromMe: isFromMe,
             date: date,
             dateEdited: nil,
-            associatedMessageType: 0,
+            associatedMessageType: associatedMessageType,
             associatedMessageEmoji: nil,
+            associatedMessageGUID: associatedMessageGUID,
             cacheHasAttachments: false,
             service: "iMessage",
             senderID: senderID,
@@ -125,6 +128,45 @@ final class CRMSyncStagedTests: XCTestCase {
     }
 
     // MARK: - stagedRows (empty-body filtering)
+
+    func testStagedRowsTurnsTapbackIntoReactionInsteadOfQuotedMessage() {
+        let tapback = makeMessage(
+            id: 44,
+            guid: "reaction-event",
+            text: "Loved “All good”",
+            associatedMessageType: 2000,
+            associatedMessageGUID: "p:0/original-message-guid"
+        )
+
+        let rows = CRMSyncService.stagedRows(
+            chatIdentifier: "+15551234567", messages: [tapback]
+        )
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].body, "")
+        XCTAssertEqual(rows[0].reaction?.targetGUID, "original-message-guid")
+        XCTAssertEqual(rows[0].reaction?.reactionType, "love")
+        XCTAssertEqual(rows[0].reaction?.isRemoval, false)
+
+        let body = CRMSyncService.stagedBody(agentID: "agent-1", rows: rows)
+        XCTAssertEqual((body["messages"] as? [[String: Any]])?.count, 0)
+        let reactions = body["reactions"] as? [[String: Any]]
+        XCTAssertEqual(reactions?.count, 1)
+        XCTAssertEqual(reactions?.first?["target_guid"] as? String, "original-message-guid")
+        XCTAssertEqual(reactions?.first?["reaction_type"] as? String, "love")
+    }
+
+    func testReviewHistoryLookbehindRowIsNotSkippedByNextCursor() {
+        let fetched = (800...1000).map {
+            makeMessage(id: Int64($0), guid: "g-\($0)")
+        }
+        let page = ReviewHistorySnapshotStore.boundedPage(fetched, pageSize: 200)
+
+        XCTAssertTrue(page.hasMore)
+        XCTAssertEqual(page.messages.first?.id, 801)
+        XCTAssertEqual(page.messages.last?.id, 1000)
+        XCTAssertEqual(page.nextBeforeRowID, 801)
+        XCTAssertTrue(800 < page.nextBeforeRowID!)
+    }
 
     func testStagedRowsSkipsEmptyBodyMessages() {
         let messages = [

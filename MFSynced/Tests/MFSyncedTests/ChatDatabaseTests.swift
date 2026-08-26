@@ -58,6 +58,14 @@ final class ChatDatabaseTests: XCTestCase {
         XCTAssertFalse(messages.isEmpty)
     }
 
+    func testFetchTapbackCarriesNormalizedTargetGUID() throws {
+        let messages = try db.fetchMessages(forChat: "+15550000001", limit: 50)
+        let reaction = try XCTUnwrap(messages.first { $0.guid == "fixture-reaction-1" })
+        XCTAssertTrue(reaction.isTapback)
+        XCTAssertEqual(reaction.tapbackReactionType, "love")
+        XCTAssertEqual(reaction.tapbackTargetGUID, "fixture-message-1")
+    }
+
     func testSearchMessages() throws {
         let results = try db.searchMessages(query: "the", limit: 10)
         XCTAssertFalse(results.isEmpty)
@@ -135,6 +143,7 @@ final class ChatDatabaseTests: XCTestCase {
                 date_edited INTEGER,
                 associated_message_type INTEGER,
                 associated_message_emoji TEXT,
+                associated_message_guid TEXT,
                 cache_has_attachments INTEGER,
                 service TEXT,
                 handle_id INTEGER
@@ -158,7 +167,15 @@ final class ChatDatabaseTests: XCTestCase {
                 (1, 'fixture-message-1', 'the first synthetic message', 0, 700000000000000000, 0, 0, 0, 'iMessage', 1),
                 (2, 'fixture-message-2', 'the second synthetic message', 1, 700000001000000000, 0, 0, 0, 'iMessage', 1),
                 (3, 'fixture-message-3', 'the synthetic group message', 0, 700000002000000000, 0, 0, 0, 'SMS', 2);
-            INSERT INTO chat_message_join (chat_id, message_id) VALUES (1, 1), (1, 2), (2, 3);
+            INSERT INTO message (
+                ROWID, guid, text, is_from_me, date, date_edited,
+                associated_message_type, associated_message_guid,
+                cache_has_attachments, service, handle_id
+            ) VALUES
+                (4, 'fixture-reaction-1', 'Loved “the first synthetic message”', 0,
+                 700000003000000000, 0, 2000, 'p:0/fixture-message-1', 0, 'iMessage', 1);
+            INSERT INTO chat_message_join (chat_id, message_id)
+                VALUES (1, 1), (1, 2), (2, 3), (1, 4);
             """
 
         var errorMessage: UnsafeMutablePointer<CChar>?
