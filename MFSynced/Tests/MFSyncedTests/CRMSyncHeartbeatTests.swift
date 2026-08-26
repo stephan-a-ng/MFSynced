@@ -58,7 +58,12 @@ final class CRMSyncHeartbeatTests: XCTestCase {
         config.isEnabled = true
         config.apiEndpoint = "http://127.0.0.1:1/v1/agent"
         config.apiKey = "test"
-        return CRMSyncService(config: config, authService: .legacyCompatibilityFixture())
+        let service = CRMSyncService(config: config, authService: .legacyCompatibilityFixture())
+        // startPolling() now owns a real async loop instead of a main-run-loop
+        // Timer. Keep heartbeat lifecycle tests from touching production-like
+        // sync storage/network when their five-second interval elapses.
+        service.pollAttemptOverride = {}
+        return service
     }
 
     private func eventually(
@@ -112,6 +117,29 @@ final class CRMSyncHeartbeatTests: XCTestCase {
         XCTAssertNil(emptyBody["owner_email"])
     }
 
+    func testHeartbeatBodyReportsTheSanitizedPollInterval() {
+        var config = CRMConfig()
+        config.pollIntervalSeconds = 1e20
+        let hugeBody = CRMSyncService.heartbeatBody(
+            config: config,
+            hostname: "test-host",
+            osVersion: "test-os",
+            uptimeSeconds: 10,
+            appVersion: nil
+        )
+        XCTAssertEqual(hugeBody["poll_interval_seconds"] as? Int, 3_600)
+
+        config.pollIntervalSeconds = .nan
+        let nonFiniteBody = CRMSyncService.heartbeatBody(
+            config: config,
+            hostname: "test-host",
+            osVersion: "test-os",
+            uptimeSeconds: 10,
+            appVersion: nil
+        )
+        XCTAssertEqual(nonFiniteBody["poll_interval_seconds"] as? Int, 5)
+    }
+
     func testHeartbeatLoopSendsImmediatelyRepeatsStopsAndRestarts() async {
         let service = makeService()
         let sleeper = ManualHeartbeatSleeper()
@@ -150,6 +178,19 @@ final class CRMSyncHeartbeatTests: XCTestCase {
         XCTAssertTrue(restarted)
         service.stopPolling()
         await sleeper.resumeAll()
+    }
+
+    func testStoppedServiceCannotStartAHeartbeatLoopDirectly() async {
+        let service = makeService()
+        let recorder = HeartbeatRecorder()
+        service.heartbeatAttemptOverride = { await recorder.record() }
+
+        service.stopPolling()
+        service.startHeartbeatLoop()
+        for _ in 0..<500 { await Task.yield() }
+
+        let count = await recorder.count
+        XCTAssertEqual(count, 0)
     }
 
     func testHeartbeatLoopNeverOverlapsAttempts() async {
