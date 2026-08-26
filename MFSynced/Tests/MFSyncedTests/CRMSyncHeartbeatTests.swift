@@ -117,6 +117,19 @@ final class CRMSyncHeartbeatTests: XCTestCase {
         XCTAssertNil(emptyBody["owner_email"])
     }
 
+    func testHeartbeatBodyOmitsHistoryCapabilityWithoutProvider() {
+        let body = CRMSyncService.heartbeatBody(
+            config: CRMConfig(),
+            hostname: "test-host",
+            osVersion: "test-os",
+            uptimeSeconds: 10,
+            appVersion: nil,
+            reviewHistoryAvailable: false
+        )
+        let capabilities = body["capabilities"] as? [String]
+        XCTAssertEqual(capabilities, ["inbound_reactions_v1"])
+    }
+
     func testHeartbeatBodyReportsTheSanitizedPollInterval() {
         var config = CRMConfig()
         config.pollIntervalSeconds = 1e20

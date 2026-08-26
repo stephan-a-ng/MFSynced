@@ -34,6 +34,46 @@ final class ChatDatabase: @unchecked Sendable {
         return db
     }
 
+    /// Create a WAL-consistent SQLite snapshot with mode 0600. The caller
+    /// owns lifecycle/expiry. `sqlite3_backup` reads one coherent source
+    /// transaction, unlike copying chat.db without its WAL sidecar.
+    func createSnapshot(at destinationPath: String) throws {
+        let source = try openConnection()
+        defer { sqlite3_close(source) }
+
+        FileManager.default.createFile(atPath: destinationPath, contents: nil)
+        var completed = false
+        defer {
+            if !completed { try? FileManager.default.removeItem(atPath: destinationPath) }
+        }
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: destinationPath
+        )
+        var destination: OpaquePointer?
+        guard sqlite3_open(destinationPath, &destination) == SQLITE_OK,
+              let destination else {
+            throw ChatDBError.openFailed("could not create review snapshot")
+        }
+        defer { sqlite3_close(destination) }
+        // Keep the private snapshot self-contained. Subsequent read opens must
+        // not create WAL/SHM sidecars with separate permission/lifecycle.
+        guard sqlite3_exec(
+            destination, "PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;",
+            nil, nil, nil
+        ) == SQLITE_OK else {
+            throw ChatDBError.queryFailed(String(cString: sqlite3_errmsg(destination)))
+        }
+        guard let backup = sqlite3_backup_init(destination, "main", source, "main") else {
+            throw ChatDBError.queryFailed(String(cString: sqlite3_errmsg(destination)))
+        }
+        let rc = sqlite3_backup_step(backup, -1)
+        let finishRC = sqlite3_backup_finish(backup)
+        guard rc == SQLITE_DONE, finishRC == SQLITE_OK else {
+            throw ChatDBError.queryFailed(String(cString: sqlite3_errmsg(destination)))
+        }
+        completed = true
+    }
+
     func getMaxRowID() throws -> Int64 {
         let db = try openConnection()
         defer { sqlite3_close(db) }
@@ -54,6 +94,7 @@ final class ChatDatabase: @unchecked Sendable {
             SELECT m.ROWID AS message_id, m.guid, m.text, m.attributedBody,
                 m.is_from_me, m.date AS message_date, m.date_edited,
                 m.associated_message_type, m.associated_message_emoji,
+                m.associated_message_guid,
                 m.cache_has_attachments, m.service,
                 h.id AS sender_id,
                 c.chat_identifier, c.display_name, c.style AS chat_style,
@@ -91,6 +132,7 @@ final class ChatDatabase: @unchecked Sendable {
             SELECT m.ROWID AS message_id, m.guid, m.text, m.attributedBody,
                 m.is_from_me, m.date AS message_date, m.date_edited,
                 m.associated_message_type, m.associated_message_emoji,
+                m.associated_message_guid,
                 m.cache_has_attachments, m.service,
                 h.id AS sender_id,
                 c.chat_identifier, c.display_name, c.style AS chat_style,
@@ -135,6 +177,7 @@ final class ChatDatabase: @unchecked Sendable {
             SELECT m.ROWID AS message_id, m.guid, m.text, m.attributedBody,
                 m.is_from_me, m.date AS message_date, m.date_edited,
                 m.associated_message_type, m.associated_message_emoji,
+                m.associated_message_guid,
                 m.cache_has_attachments, m.service,
                 h.id AS sender_id,
                 c.chat_identifier, c.display_name, c.style AS chat_style,
@@ -387,6 +430,7 @@ final class ChatDatabase: @unchecked Sendable {
             SELECT m.ROWID AS message_id, m.guid, m.text, m.attributedBody,
                 m.is_from_me, m.date AS message_date, m.date_edited,
                 m.associated_message_type, m.associated_message_emoji,
+                m.associated_message_guid,
                 m.cache_has_attachments, m.service,
                 h.id AS sender_id,
                 c.chat_identifier, c.display_name, c.style AS chat_style,
@@ -427,15 +471,16 @@ final class ChatDatabase: @unchecked Sendable {
                     ? AppleDateConverter.toDate(sqlite3_column_int64(stmt, 6)) : nil,
                 associatedMessageType: Int(sqlite3_column_int(stmt, 7)),
                 associatedMessageEmoji: columnText(stmt, 8),
-                cacheHasAttachments: sqlite3_column_int(stmt, 9) != 0,
-                service: columnText(stmt, 10) ?? "iMessage",
-                senderID: columnText(stmt, 11),
-                chatIdentifier: columnText(stmt, 12),
-                chatDisplayName: columnText(stmt, 13),
-                chatStyle: sqlite3_column_type(stmt, 14) != SQLITE_NULL
-                    ? Int(sqlite3_column_int(stmt, 14)) : nil,
-                attachmentNames: columnText(stmt, 15),
-                attachmentTypes: columnText(stmt, 16)
+                associatedMessageGUID: columnText(stmt, 9),
+                cacheHasAttachments: sqlite3_column_int(stmt, 10) != 0,
+                service: columnText(stmt, 11) ?? "iMessage",
+                senderID: columnText(stmt, 12),
+                chatIdentifier: columnText(stmt, 13),
+                chatDisplayName: columnText(stmt, 14),
+                chatStyle: sqlite3_column_type(stmt, 15) != SQLITE_NULL
+                    ? Int(sqlite3_column_int(stmt, 15)) : nil,
+                attachmentNames: columnText(stmt, 16),
+                attachmentTypes: columnText(stmt, 17)
             ))
         }
         return messages

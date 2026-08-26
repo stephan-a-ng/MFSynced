@@ -99,6 +99,14 @@ final class AppState {
                 return try database.fetchMessages(forChat: chatIdentifier, afterRowID: afterRowID, limit: limit)
             }
         }
+        let reviewSnapshots = ReviewHistorySnapshotStore(source: database)
+        crmService?.reviewHistoryPageProvider = { chatIdentifier, beforeRowID, snapshotID in
+            try reviewSnapshots.page(
+                chatIdentifier: chatIdentifier,
+                beforeRowID: beforeRowID,
+                snapshotID: snapshotID
+            )
+        }
         crmService?.chatMaxRowID = {
             (try? database.getMaxRowID()) ?? 0
         }

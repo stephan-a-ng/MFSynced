@@ -232,6 +232,13 @@ final class CRMSyncService {
     /// catalogChatsProvider so the sync service stays testable without a
     /// live chat.db.
     var stagedMessagesProvider: (@Sendable (_ chatIdentifier: String, _ mode: StagedFetchMode) throws -> [Message])?
+    /// Owner-only historical page provider. Production uses a short-lived,
+    /// mode-0600 SQLite snapshot; tests inject synthetic pages.
+    var reviewHistoryPageProvider: (@Sendable (
+        _ chatIdentifier: String,
+        _ beforeRowID: Int64?,
+        _ snapshotID: String?
+    ) throws -> ReviewHistorySnapshotPage)?
     // Internal (not private) for test visibility of retry semantics.
     var pushedContactPhones = Set<String>()
     /// Catalog gating state — in-memory only (telemetry-like: a relaunch
@@ -331,6 +338,9 @@ final class CRMSyncService {
     /// the per-agent cursor.
     private let stagedStateLock = NSLock()
     private var stagedUploadInFlight = false
+    private var reviewHistoryInFlight = false
+    private let serverCapabilitiesLock = NSLock()
+    private var serverCapabilities = Set<String>()
     private var stagedRotationAfterByAgentID: [String: String] = [:]
     private let session = URLSession.shared
     /// App-process start, for the heartbeat's uptime_seconds.
@@ -586,6 +596,28 @@ final class CRMSyncService {
 
     func queueInbound(message: Message, contactName: String? = nil) {
         guard config.syncedPhoneNumbers.contains(message.chatIdentifier ?? "") else { return }
+        if message.isTapback {
+            guard let targetGUID = message.tapbackTargetGUID,
+                  let reactionType = message.tapbackReactionType else { return }
+            let payload: [String: Any] = [
+                "event_guid": message.guid,
+                "message_guid": targetGUID,
+                "reaction_type": reactionType,
+                "is_from_me": message.isFromMe,
+                "is_removal": message.isTapbackRemoval,
+                "source_row_id": message.id,
+                "sent_at": ISO8601DateFormatter().string(from: message.date),
+            ]
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: payload),
+                  let jsonString = String(data: jsonData, encoding: .utf8) else { return }
+            try? syncQueue.enqueue(
+                direction: "reaction",
+                messageGuid: message.guid,
+                phone: message.chatIdentifier ?? "",
+                payload: jsonString
+            )
+            return
+        }
         var payload: [String: Any] = [
             "id": message.guid,
             "phone": message.senderID ?? message.chatIdentifier ?? "",
@@ -618,7 +650,11 @@ final class CRMSyncService {
         // where a locked/cold chat.db could otherwise defeat the deadline.
         _ = await currentSendHandle()
         guard !Task.isCancelled, !isStopped else { return }
+        prepareReactionBackfillIfNeeded()
+        guard !Task.isCancelled, !isStopped else { return }
         await pushInbound()
+        guard !Task.isCancelled, !isStopped else { return }
+        await pushReactions()
         guard !Task.isCancelled, !isStopped else { return }
         await pullOutbound()
         guard !Task.isCancelled, !isStopped else { return }
@@ -638,12 +674,45 @@ final class CRMSyncService {
         // Last of all: staged content upload is background console-review
         // material for non-gated chats, never part of the send/receive path.
         await uploadStaged()
+        guard !Task.isCancelled, !isStopped else { return }
+        await processReviewHistoryRequests()
     }
 
     private var isStopped: Bool {
         taskLock.lock()
         defer { taskLock.unlock() }
         return stopped
+    }
+
+    private static let reactionBackfillPreparedKey = "reaction_backfill_v1_prepared"
+
+    /// Repairs rows staged by older builds as quoted pseudo-messages.  The
+    /// ordinary staging pipeline replays its bounded newest-200 window after
+    /// the cursor reset; gated chats are scanned once here and queued through
+    /// the live reaction endpoint.  Queue GUID dedup makes crash retries safe.
+    private func prepareReactionBackfillIfNeeded() {
+        let supportsRepair = serverCapabilitiesLock.withLock {
+            serverCapabilities.contains("inbound_reactions_v1")
+        }
+        guard supportsRepair,
+              (try? syncQueue.getState(key: Self.reactionBackfillPreparedKey)) == nil,
+              let provider = stagedMessagesProvider else { return }
+        do {
+            // Read/queue the bounded live repair first. If chat.db is locked,
+            // no cursor state changes. Queue GUID dedup makes partial retries
+            // safe.
+            for chatIdentifier in config.syncedPhoneNumbers.sorted() {
+                let messages = try provider(
+                    chatIdentifier, .backfill(limit: Self.stagedBackfillWindow)
+                )
+                for message in messages where message.isTapback {
+                    queueInbound(message: message)
+                }
+            }
+            try syncQueue.prepareReactionBackfill(markerKey: Self.reactionBackfillPreparedKey)
+        } catch {
+            crmLog("[CRM] reaction backfill preparation will retry")
+        }
     }
 
     /// Drain one batch of buffered crmLog lines to the nexus
@@ -953,8 +1022,11 @@ final class CRMSyncService {
         osVersion: String,
         uptimeSeconds: Int,
         appVersion: String?,
-        sendHandle: String? = nil
+        sendHandle: String? = nil,
+        reviewHistoryAvailable: Bool = true
     ) -> [String: Any] {
+        var capabilities = ["inbound_reactions_v1"]
+        if reviewHistoryAvailable { capabilities.append("review_history_pages_v1") }
         var body: [String: Any] = [
             "agent_id": config.agentID,
             "hostname": hostname,
@@ -964,6 +1036,7 @@ final class CRMSyncService {
             ),
             "uptime_seconds": max(0, uptimeSeconds),
             "gate_applied": Array(config.syncedPhoneNumbers).sorted(),
+            "capabilities": capabilities,
         ]
         if let appVersion {
             body["app_version"] = appVersion
@@ -1044,18 +1117,25 @@ final class CRMSyncService {
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             uptimeSeconds: Int(Date().timeIntervalSince(launchedAt)),
             appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-            sendHandle: cachedSendHandleSnapshot()
+            sendHandle: cachedSendHandleSnapshot(),
+            reviewHistoryAvailable: reviewHistoryPageProvider != nil
         )
         let bodyData = try? JSONSerialization.data(withJSONObject: body)
         var request = makeRequest(url: url, method: "POST", body: bodyData, authorization: authorization)
         request.timeoutInterval = 8
         do {
-            let (_, response) = try await session.data(for: request)
+            let (data, response) = try await session.data(for: request)
             if let http = response as? HTTPURLResponse, http.statusCode != 200 {
                 // 404 = old backend without the fleet wire; anything else is
                 // worth one line per tick in the local log, nothing more.
                 if http.statusCode != 404 {
                     crmLog("[CRM] heartbeat: HTTP \(http.statusCode)")
+                }
+            } else if let http = response as? HTTPURLResponse, http.statusCode == 200 {
+                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let values = json?["server_capabilities"] as? [String] ?? []
+                serverCapabilitiesLock.withLock {
+                    serverCapabilities = Set(values)
                 }
             }
         } catch {
@@ -1374,9 +1454,9 @@ final class CRMSyncService {
     static let stagedQueryBudget = 40
     static let stagedIncrementalQueryReserve = 5
 
-    /// One wire-ready staged message row. `rowID` is bookkeeping only (chat.db
-    /// ROWID, for cursor advancement) — it is never sent on the wire, only
-    /// the guid identifies a row to the server.
+    /// One wire-ready staged message row. `rowID` is sent as `source_row_id`
+    /// by capable clients so owner-only review can request the next older
+    /// page. The guid remains the idempotency key.
     struct StagedMessageRow: Equatable {
         let chatIdentifier: String
         let guid: String
@@ -1385,6 +1465,13 @@ final class CRMSyncService {
         let body: String
         let sentAt: Date
         let rowID: Int64
+        var reaction: StagedReactionValue? = nil
+    }
+
+    struct StagedReactionValue: Equatable {
+        let targetGUID: String
+        let reactionType: String
+        let isRemoval: Bool
     }
 
     /// Whether a chat's fetch this tick is an initial backfill (no cursor
@@ -1514,12 +1601,29 @@ final class CRMSyncService {
     }
 
     /// Converts one chat's already-fetched chat.db messages into wire rows,
-    /// skipping messages with no displayable body (tapbacks, empty/whitespace
-    /// text with no attributedBody fallback) — a row with nothing to show the
-    /// owner in the console isn't worth a slot in the 200-row budget. Pure:
+    /// converts tapbacks to reaction events and skips empty/whitespace rows.
+    /// A tapback never becomes a synthesized quoted-text message. Pure:
     /// takes already-fetched Message values, no chat.db access.
     static func stagedRows(chatIdentifier: String, messages: [Message]) -> [StagedMessageRow] {
-        messages.compactMap { msg in
+        messages.compactMap { msg -> StagedMessageRow? in
+            if msg.isTapback {
+                guard let targetGUID = msg.tapbackTargetGUID,
+                      let reactionType = msg.tapbackReactionType else { return nil }
+                return StagedMessageRow(
+                    chatIdentifier: chatIdentifier,
+                    guid: msg.guid,
+                    sender: msg.senderID,
+                    isFromMe: msg.isFromMe,
+                    body: "",
+                    sentAt: msg.date,
+                    rowID: msg.id,
+                    reaction: StagedReactionValue(
+                        targetGUID: targetGUID,
+                        reactionType: reactionType,
+                        isRemoval: msg.isTapbackRemoval
+                    )
+                )
+            }
             guard let body = msg.displayText, !body.isEmpty else { return nil }
             return StagedMessageRow(
                 chatIdentifier: chatIdentifier,
@@ -1538,10 +1642,11 @@ final class CRMSyncService {
     /// supplies real chat.db rows, tests assert on the dict directly.
     static func stagedBody(agentID: String, rows: [StagedMessageRow]) -> [String: Any] {
         let iso = ISO8601DateFormatter()
-        let messages: [[String: Any]] = rows.map { row in
+        let messages: [[String: Any]] = rows.filter { $0.reaction == nil }.map { row in
             var dict: [String: Any] = [
                 "chat_identifier": row.chatIdentifier,
                 "guid": row.guid,
+                "source_row_id": row.rowID,
                 "is_from_me": row.isFromMe,
                 "body": row.body,
                 "sent_at": iso.string(from: row.sentAt),
@@ -1551,7 +1656,20 @@ final class CRMSyncService {
             }
             return dict
         }
-        return ["agent_id": agentID, "messages": messages]
+        let reactions: [[String: Any]] = rows.compactMap { row in
+            guard let reaction = row.reaction else { return nil }
+            return [
+                "chat_identifier": row.chatIdentifier,
+                "event_guid": row.guid,
+                "target_guid": reaction.targetGUID,
+                "reaction_type": reaction.reactionType,
+                "is_from_me": row.isFromMe,
+                "is_removal": reaction.isRemoval,
+                "source_row_id": row.rowID,
+                "sent_at": iso.string(from: row.sentAt),
+            ]
+        }
+        return ["agent_id": agentID, "messages": messages, "reactions": reactions]
     }
 
     /// Per-chat new cursor state after a staged-upload tick, from the mode
@@ -1767,12 +1885,13 @@ final class CRMSyncService {
             case 200:
                 guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let confirmed = json["confirmed"] as? [String] else { return }
+                let confirmedReactions = json["confirmed_reactions"] as? [String] ?? []
                 let messageCounts = Dictionary(
                     chats.map { ($0.chatIdentifier, $0.messageCount) }, uniquingKeysWith: { first, _ in first }
                 )
                 let updates = Self.cursorUpdates(
                     plan: plan,
-                    confirmedGuids: Set(confirmed),
+                    confirmedGuids: Set(confirmed + confirmedReactions),
                     rows: rows,
                     exhaustedChats: [],
                     existingCursors: cursors,
@@ -1796,6 +1915,117 @@ final class CRMSyncService {
         } catch {
             crmLog("[CRM] uploadStaged: network error: \(error.localizedDescription)")
         }
+    }
+
+    // MARK: - Owner-only review history pages
+
+    func processReviewHistoryRequests() async {
+        let started = stagedStateLock.withLock { () -> Bool in
+            guard !reviewHistoryInFlight else { return false }
+            reviewHistoryInFlight = true
+            return true
+        }
+        guard started else { return }
+        defer { stagedStateLock.withLock { reviewHistoryInFlight = false } }
+        guard let provider = reviewHistoryPageProvider,
+              let url = URL(string: "\(agentEndpoint)/review/history/requests"),
+              let authorization = await authorizationHeaderValue() else { return }
+
+        let request = makeRequest(
+            url: url, method: "GET", body: nil, authorization: authorization
+        )
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return }
+            if http.statusCode == 404 { return } // compatibility with old backend
+            guard http.statusCode == 200,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let requests = json["requests"] as? [[String: Any]],
+                  let item = requests.first,
+                  let requestID = item["request_id"] as? String,
+                  let chatIdentifier = item["chat_identifier"] as? String else { return }
+
+            let beforeRowID = (item["before_row_id"] as? NSNumber)?.int64Value
+            let snapshotID = item["snapshot_id"] as? String
+            do {
+                let page = try provider(chatIdentifier, beforeRowID, snapshotID)
+                let rows = Self.stagedRows(chatIdentifier: chatIdentifier, messages: page.messages)
+                let iso = ISO8601DateFormatter()
+                let messages: [[String: Any]] = rows.filter { $0.reaction == nil }.map { row in
+                    var value: [String: Any] = [
+                        "guid": row.guid,
+                        "source_row_id": row.rowID,
+                        "is_from_me": row.isFromMe,
+                        "body": row.body,
+                        "sent_at": iso.string(from: row.sentAt),
+                    ]
+                    if let sender = row.sender { value["sender"] = sender }
+                    return value
+                }
+                let reactions: [[String: Any]] = rows.compactMap { row in
+                    guard let reaction = row.reaction else { return nil }
+                    return [
+                        "chat_identifier": chatIdentifier,
+                        "event_guid": row.guid,
+                        "target_guid": reaction.targetGUID,
+                        "reaction_type": reaction.reactionType,
+                        "is_from_me": row.isFromMe,
+                        "is_removal": reaction.isRemoval,
+                        "source_row_id": row.rowID,
+                        "sent_at": iso.string(from: row.sentAt),
+                    ]
+                }
+                var body: [String: Any] = [
+                    "snapshot_id": page.snapshotID,
+                    "snapshot_as_of": iso.string(from: page.snapshotAsOf),
+                    "has_more": page.hasMore,
+                    "messages": messages,
+                    "reactions": reactions,
+                ]
+                if let nextBeforeRowID = page.nextBeforeRowID {
+                    body["next_before_row_id"] = nextBeforeRowID
+                }
+                await finishReviewHistoryRequest(
+                    requestID: requestID,
+                    suffix: "complete",
+                    body: body,
+                    authorization: authorization
+                )
+            } catch ReviewHistorySnapshotError.snapshotExpired {
+                await finishReviewHistoryRequest(
+                    requestID: requestID,
+                    suffix: "fail",
+                    body: ["error_code": "snapshot_expired"],
+                    authorization: authorization
+                )
+            } catch {
+                await finishReviewHistoryRequest(
+                    requestID: requestID,
+                    suffix: "fail",
+                    body: ["error_code": "history_read_failed"],
+                    authorization: authorization
+                )
+            }
+        } catch {
+            // Owner-review history is non-critical background work. Avoid
+            // logging request handles or message content; the server request
+            // remains claimable until its bounded expiry.
+        }
+    }
+
+    private func finishReviewHistoryRequest(
+        requestID: String,
+        suffix: String,
+        body: [String: Any],
+        authorization: String
+    ) async {
+        guard let encodedID = requestID.addingPercentEncoding(
+            withAllowedCharacters: .urlPathAllowed
+        ), let url = URL(
+            string: "\(agentEndpoint)/review/history/requests/\(encodedID)/\(suffix)"
+        ), let data = try? JSONSerialization.data(withJSONObject: body) else { return }
+        let request = makeRequest(url: url, method: "POST", body: data, authorization: authorization)
+        _ = try? await session.data(for: request)
     }
 
     /// Watch chat.db for the just-sent message's delivery receipt or error
@@ -1854,6 +2084,77 @@ final class CRMSyncService {
         taskLock.lock()
         backgroundTasks.removeValue(forKey: id)
         taskLock.unlock()
+    }
+
+    private func pushReactions() async {
+        guard var entries = try? syncQueue.fetchPending(direction: "reaction", limit: 50),
+              !entries.isEmpty else { return }
+        let ungated = entries.filter { !config.syncedPhoneNumbers.contains($0.phone) }
+        for entry in ungated { try? syncQueue.remove(messageGuid: entry.messageGuid) }
+        entries.removeAll { !config.syncedPhoneNumbers.contains($0.phone) }
+        guard !entries.isEmpty else { return }
+
+        let reactions = entries.compactMap { entry -> [String: Any]? in
+            guard let data = entry.payload.data(using: .utf8) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+        guard reactions.count == entries.count,
+              let bodyData = try? JSONSerialization.data(
+                withJSONObject: ["reactions": reactions]
+              ),
+              let primary = config.targets.first,
+              let url = targetURL(primary, path: "/reactions/inbound"),
+              let authorization = await authService.authorizationHeaderValue(for: primary)
+        else { return }
+
+        let request = makeRequest(
+            url: url, method: "POST", body: bodyData, authorization: authorization
+        )
+        do {
+            let (data, response) = try await session.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            guard status == 200,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  (json["confirmed"] as? NSNumber)?.intValue == entries.count else {
+                for entry in entries {
+                    let backoff = min(300.0, 5.0 * pow(2.0, Double(entry.retryCount)))
+                    try? syncQueue.incrementRetry(
+                        messageGuid: entry.messageGuid, nextRetryIn: backoff
+                    )
+                }
+                crmLog("[CRM] pushReactions \(primary.name): HTTP \(status)")
+                return
+            }
+            for entry in entries { try? syncQueue.remove(messageGuid: entry.messageGuid) }
+            crmLog("[CRM] pushReactions \(primary.name): HTTP 200")
+        } catch {
+            for entry in entries {
+                let backoff = min(300.0, 5.0 * pow(2.0, Double(entry.retryCount)))
+                try? syncQueue.incrementRetry(messageGuid: entry.messageGuid, nextRetryIn: backoff)
+            }
+            crmLog("[CRM] pushReactions \(primary.name): network error: \(error.localizedDescription)")
+            return
+        }
+
+        for mirror in config.targets.dropFirst() {
+            guard let mirrorURL = targetURL(mirror, path: "/reactions/inbound"),
+                  let mirrorAuthorization = await authService.authorizationHeaderValue(for: mirror)
+            else { continue }
+            let mirrorRequest = makeRequest(
+                url: mirrorURL,
+                method: "POST",
+                body: bodyData,
+                authorization: mirrorAuthorization
+            )
+            do {
+                let (_, response) = try await session.data(for: mirrorRequest)
+                crmLog(
+                    "[CRM] pushReactions \(mirror.name): HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)"
+                )
+            } catch {
+                crmLog("[CRM] pushReactions \(mirror.name): network error: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func pushInbound() async {

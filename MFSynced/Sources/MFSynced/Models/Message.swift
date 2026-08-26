@@ -10,6 +10,7 @@ struct Message: Identifiable, Hashable {
     let dateEdited: Date?
     let associatedMessageType: Int
     let associatedMessageEmoji: String?
+    var associatedMessageGUID: String? = nil
     let cacheHasAttachments: Bool
     let service: String
     let senderID: String?
@@ -32,6 +33,29 @@ struct Message: Identifiable, Hashable {
 
     var isGroup: Bool { chatStyle == 43 }
     var isTapback: Bool { associatedMessageType != 0 }
+
+    /// Apple's associated-message GUID may be prefixed (for example
+    /// `p:0/<guid>`).  The nexus stores the base message GUID, so reactions
+    /// normalize to the final path component before upload.
+    var tapbackTargetGUID: String? {
+        guard let raw = associatedMessageGUID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else { return nil }
+        return raw.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init)
+    }
+
+    var tapbackReactionType: String? {
+        switch associatedMessageType {
+        case 2000, 3000: return "love"
+        case 2001, 3001: return "like"
+        case 2002, 3002: return "dislike"
+        case 2003, 3003: return "laugh"
+        case 2004, 3004: return "emphasize"
+        case 2005, 3005: return "question"
+        default: return nil
+        }
+    }
+
+    var isTapbackRemoval: Bool { (3000...3005).contains(associatedMessageType) }
 
     var tapbackLabel: String? {
         switch associatedMessageType {

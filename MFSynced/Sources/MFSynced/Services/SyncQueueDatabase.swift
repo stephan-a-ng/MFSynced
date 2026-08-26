@@ -278,6 +278,53 @@ final class SyncQueueDatabase {
         return cursors
     }
 
+    /// One-time schema/semantic repair hook: a new content type that older
+    /// clients misclassified can ask the bounded staging backfill to replay.
+    func resetAllStagedCursors() throws {
+        guard let db = open() else { throw SyncQueueError.openFailed }
+        defer { sqlite3_close(db) }
+        guard sqlite3_exec(db, "DELETE FROM staged_cursors", nil, nil, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+    }
+
+    /// Atomically marks the one-time reaction repair prepared and resets the
+    /// staging cursors. A crash can therefore produce neither change or both,
+    /// never an unset marker paired with repeatedly erased progress.
+    @discardableResult
+    func prepareReactionBackfill(markerKey: String) throws -> Bool {
+        guard let db = open() else { throw SyncQueueError.openFailed }
+        defer { sqlite3_close(db) }
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE", nil, nil, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        var committed = false
+        defer {
+            if !committed { sqlite3_exec(db, "ROLLBACK", nil, nil, nil) }
+        }
+
+        let insertSQL = "INSERT OR IGNORE INTO kv_state (key, value) VALUES (?, '1')"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, insertSQL, -1, &stmt, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (markerKey as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        let inserted = sqlite3_changes(db) == 1
+        if inserted,
+           sqlite3_exec(db, "DELETE FROM staged_cursors", nil, nil, nil) != SQLITE_OK {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        guard sqlite3_exec(db, "COMMIT", nil, nil, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        committed = true
+        return inserted
+    }
+
     // MARK: - kv_state (scalar sync state, e.g. poll cursors)
 
     /// Reads one `kv_state` value, or nil when `key` has never been set —
