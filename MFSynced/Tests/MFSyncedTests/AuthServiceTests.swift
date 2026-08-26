@@ -170,6 +170,7 @@ final class AuthServiceTests: XCTestCase {
         XCTAssertEqual(value("code_challenge"), "challenge-xyz789")
         XCTAssertEqual(value("code_challenge_method"), "S256")
         XCTAssertEqual(value("scope"), "openid email profile")
+        XCTAssertEqual(value("prompt"), "select_account")
 
         // The exact bound port is a signIn()-time (socket-bind) concern, not
         // this pure builder's — just require it to be one of the configured
@@ -330,6 +331,11 @@ final class AuthServiceTests: XCTestCase {
         let requests = await transport.requests
         XCTAssertEqual(requests.count, 1)
         XCTAssertEqual(requests[0].url, testConfig.issuer.appendingPathComponent("token"))
+        XCTAssertEqual(requests[0].timeoutInterval, AuthService.refreshRequestTimeoutSeconds)
+        XCTAssertLessThan(
+            requests[0].timeoutInterval, 10,
+            "token refresh must finish before CRM's ten-second heartbeat deadline"
+        )
         let body = try XCTUnwrap(bodyString(requests[0]))
         XCTAssertTrue(body.contains("grant_type=refresh_token"), "body was: \(body)")
         XCTAssertTrue(body.contains("old-refresh"), "refresh must send the CURRENT refresh token, body was: \(body)")

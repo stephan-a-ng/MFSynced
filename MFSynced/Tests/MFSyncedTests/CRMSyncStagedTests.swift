@@ -18,6 +18,23 @@ private final class LockedFlag: @unchecked Sendable {
     }
 }
 
+private final class LockedStrings: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [String] = []
+
+    func append(_ value: String) {
+        lock.lock()
+        stored.append(value)
+        lock.unlock()
+    }
+
+    var values: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+}
+
 final class CRMSyncStagedTests: XCTestCase {
 
     // MARK: - Test helpers
@@ -225,13 +242,161 @@ final class CRMSyncStagedTests: XCTestCase {
         )
 
         XCTAssertEqual(plan.count, 2)
-        guard case .incremental = plan[0].mode else {
-            return XCTFail("expected incremental probe for the done chat")
-        }
-        guard case .backfill(let limit) = plan[1].mode else {
+        guard case .backfill(let limit) = plan[0].mode else {
             return XCTFail("the fresh chat must still get its backfill slot")
         }
         XCTAssertEqual(limit, 120)
+        guard case .incremental = plan[1].mode else {
+            return XCTFail("expected incremental probe after higher-priority backfill")
+        }
+    }
+
+    func testStagedRowsPlanCapsQuietChatQueriesPerTick() {
+        let chats = (0..<1_500).map {
+            ChatCatalogEntry(
+                chatIdentifier: String(format: "chat-%04d", $0),
+                displayName: nil,
+                lastActivityAt: nil,
+                messageCount: 200
+            )
+        }
+        let cursors = Dictionary(uniqueKeysWithValues: chats.map {
+            ($0.chatIdentifier, StagedCursor(
+                lastRowID: 200, oldestRowID: 1, backfilledCount: 200, backfillDone: true
+            ))
+        })
+
+        let plan = CRMSyncService.stagedRowsPlan(
+            chats: chats,
+            cursors: cursors,
+            gated: [],
+            budget: 200,
+            queryBudget: 40,
+            rotationAfter: nil
+        )
+
+        XCTAssertEqual(plan.count, 40)
+        XCTAssertEqual(plan.first?.chatIdentifier, "chat-0000")
+        XCTAssertEqual(plan.last?.chatIdentifier, "chat-0039")
+    }
+
+    func testStagedRowsPlanRotatesAcrossFifteenHundredQuietChats() {
+        let chats = (0..<1_500).map {
+            ChatCatalogEntry(
+                chatIdentifier: String(format: "chat-%04d", $0),
+                displayName: nil,
+                lastActivityAt: nil,
+                messageCount: 200
+            )
+        }
+        let cursors = Dictionary(uniqueKeysWithValues: chats.map {
+            ($0.chatIdentifier, StagedCursor(
+                lastRowID: 200, oldestRowID: 1, backfilledCount: 200, backfillDone: true
+            ))
+        })
+        var rotationAfter: String?
+        var seen = Set<String>()
+
+        for _ in 0..<38 {
+            let plan = CRMSyncService.stagedRowsPlan(
+                chats: chats,
+                cursors: cursors,
+                gated: [],
+                budget: 200,
+                queryBudget: 40,
+                rotationAfter: rotationAfter
+            )
+            let ids = plan.map(\.chatIdentifier)
+            seen.formUnion(ids)
+            rotationAfter = ids.last
+        }
+
+        XCTAssertEqual(seen.count, 1_500)
+    }
+
+    func testStagedRowsPlanRotationIsStableAcrossCatalogReorderingAndChurn() {
+        let ids = ["chat-d", "chat-a", "chat-c"]
+        let cursors = Dictionary(uniqueKeysWithValues: ids.map {
+            ($0, StagedCursor(
+                lastRowID: 200, oldestRowID: 1, backfilledCount: 200, backfillDone: true
+            ))
+        })
+        let chats = ids.map {
+            ChatCatalogEntry(
+                chatIdentifier: $0, displayName: nil, lastActivityAt: nil, messageCount: 200
+            )
+        }
+
+        let plan = CRMSyncService.stagedRowsPlan(
+            chats: Array(chats.reversed()),
+            cursors: cursors,
+            gated: [],
+            budget: 200,
+            queryBudget: 3,
+            rotationAfter: "chat-b"
+        )
+
+        XCTAssertEqual(plan.map(\.chatIdentifier), ["chat-c", "chat-d", "chat-a"])
+    }
+
+    func testStagedRowsPlanPrioritizesBackfillWithinQueryBudget() {
+        let doneChats = (0..<10).map {
+            ChatCatalogEntry(
+                chatIdentifier: String(format: "done-%02d", $0),
+                displayName: nil,
+                lastActivityAt: nil,
+                messageCount: 200
+            )
+        }
+        let fresh = ChatCatalogEntry(
+            chatIdentifier: "fresh", displayName: nil, lastActivityAt: nil, messageCount: 200
+        )
+        let cursors = Dictionary(uniqueKeysWithValues: doneChats.map {
+            ($0.chatIdentifier, StagedCursor(
+                lastRowID: 200, oldestRowID: 1, backfilledCount: 200, backfillDone: true
+            ))
+        })
+
+        let plan = CRMSyncService.stagedRowsPlan(
+            chats: doneChats + [fresh],
+            cursors: cursors,
+            gated: [],
+            budget: 200,
+            queryBudget: 3,
+            rotationAfter: nil
+        )
+
+        XCTAssertEqual(plan.count, 3)
+        XCTAssertEqual(plan[0].chatIdentifier, "fresh")
+        guard case .backfill(let limit) = plan[0].mode else {
+            return XCTFail("fresh chat should receive the first query")
+        }
+        XCTAssertEqual(limit, 200)
+        XCTAssertEqual(plan.dropFirst().map(\.chatIdentifier), ["done-00", "done-01"])
+    }
+
+    func testStagedRowsPlanKeepsCatalogActivityOrderForBackfills() {
+        let chats = [
+            ChatCatalogEntry(
+                chatIdentifier: "z-recent", displayName: nil,
+                lastActivityAt: Date(timeIntervalSince1970: 2), messageCount: 200
+            ),
+            ChatCatalogEntry(
+                chatIdentifier: "a-old", displayName: nil,
+                lastActivityAt: Date(timeIntervalSince1970: 1), messageCount: 200
+            ),
+        ]
+
+        let plan = CRMSyncService.stagedRowsPlan(
+            chats: chats,
+            cursors: [:],
+            gated: [],
+            budget: 200,
+            queryBudget: 1,
+            rotationAfter: nil
+        )
+
+        XCTAssertEqual(plan.first?.chatIdentifier, "z-recent")
     }
 
     func testStagedRowsPlanContinuesBackfillWhenCursorExistsButNotDone() {
@@ -689,6 +854,128 @@ final class CRMSyncStagedTests: XCTestCase {
         service.catalogChatsProvider = { [] }
         service.stagedMessagesProvider = { _, _ in [] }
         await service.uploadStaged()
+    }
+
+    func testUploadStagedAdvancesRotationAfterActualQuietProbes() async {
+        let syncQueue = SyncQueueDatabase(
+            path: NSTemporaryDirectory() + "test_rotation_\(UUID().uuidString).db"
+        )
+        let chats = (0..<50).map {
+            ChatCatalogEntry(
+                chatIdentifier: String(format: "chat-%02d", $0),
+                displayName: nil,
+                lastActivityAt: nil,
+                messageCount: 200
+            )
+        }
+        for chat in chats {
+            try? syncQueue.setStagedCursor(
+                chatIdentifier: chat.chatIdentifier,
+                lastRowID: 200,
+                oldestRowID: 1,
+                backfilledCount: 200,
+                backfillDone: true
+            )
+        }
+        let service = makeService(syncQueue: syncQueue)
+        service.catalogChatsProvider = { chats }
+        let queried = LockedStrings()
+        service.stagedMessagesProvider = { chatIdentifier, _ in
+            queried.append(chatIdentifier)
+            return []
+        }
+
+        await service.uploadStaged()
+        await service.uploadStaged()
+
+        let ids = queried.values
+        XCTAssertEqual(Array(ids.prefix(40)), (0..<40).map { String(format: "chat-%02d", $0) })
+        XCTAssertEqual(Array(ids.dropFirst(40).prefix(10)), (40..<50).map { String(format: "chat-%02d", $0) })
+    }
+
+    func testUploadStagedRetriesIncrementalChatTruncatedBySharedRowCap() async {
+        let syncQueue = SyncQueueDatabase(
+            path: NSTemporaryDirectory() + "test_rotation_truncation_\(UUID().uuidString).db"
+        )
+        let chats = ["chat-a", "chat-b"].map {
+            ChatCatalogEntry(
+                chatIdentifier: $0, displayName: nil,
+                lastActivityAt: nil, messageCount: 200
+            )
+        }
+        for chat in chats {
+            try? syncQueue.setStagedCursor(
+                chatIdentifier: chat.chatIdentifier,
+                lastRowID: 200,
+                oldestRowID: 1,
+                backfilledCount: 200,
+                backfillDone: true
+            )
+        }
+        let service = makeService(syncQueue: syncQueue)
+        service.catalogChatsProvider = { chats }
+        let queried = LockedStrings()
+        service.stagedMessagesProvider = { chatIdentifier, _ in
+            queried.append(chatIdentifier)
+            let count = chatIdentifier == "chat-a" ? 150 : 200
+            return (1...count).map {
+                self.makeMessage(
+                    id: Int64($0), guid: "\(chatIdentifier)-\($0)",
+                    chatIdentifier: chatIdentifier
+                )
+            }
+        }
+
+        await service.uploadStaged()
+        await service.uploadStaged()
+
+        XCTAssertEqual(
+            queried.values,
+            ["chat-a", "chat-b", "chat-b"],
+            "the partially accepted chat must be first again on the next pass"
+        )
+    }
+
+    func testUploadStagedProbesIncrementalBeforeFullBackfillUsesRowBudget() async {
+        let syncQueue = SyncQueueDatabase(
+            path: NSTemporaryDirectory() + "test_mixed_\(UUID().uuidString).db"
+        )
+        try? syncQueue.setStagedCursor(
+            chatIdentifier: "done",
+            lastRowID: 200,
+            oldestRowID: 1,
+            backfilledCount: 200,
+            backfillDone: true
+        )
+        let service = makeService(syncQueue: syncQueue)
+        service.catalogChatsProvider = {
+            [
+                ChatCatalogEntry(
+                    chatIdentifier: "fresh", displayName: nil,
+                    lastActivityAt: Date(timeIntervalSince1970: 2), messageCount: 200
+                ),
+                ChatCatalogEntry(
+                    chatIdentifier: "done", displayName: nil,
+                    lastActivityAt: Date(timeIntervalSince1970: 1), messageCount: 200
+                ),
+            ]
+        }
+        let queried = LockedStrings()
+        service.stagedMessagesProvider = { chatIdentifier, mode in
+            queried.append(chatIdentifier)
+            if case .backfill = mode {
+                return (1...200).map {
+                    self.makeMessage(
+                        id: Int64($0), guid: "fresh-\($0)", chatIdentifier: "fresh"
+                    )
+                }
+            }
+            return []
+        }
+
+        await service.uploadStaged()
+
+        XCTAssertEqual(Array(queried.values.prefix(2)), ["done", "fresh"])
     }
 
     @MainActor
