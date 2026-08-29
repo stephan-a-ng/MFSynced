@@ -1,4 +1,4 @@
-import { useAuthStore } from '../shared/auth/store';
+import { authFetch } from '../shared/auth/store';
 
 const BASE_URL = `${import.meta.env.VITE_API_URL || ''}/v1`;
 
@@ -10,36 +10,23 @@ export class ApiError extends Error {
   }
 }
 
-function authHeader(): Record<string, string> {
-  const { accessToken } = useAuthStore.getState();
-  return accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
-}
-
+/**
+ * Every request below is routed through the store's `authFetch` (a thin
+ * wrapper over the @moonfive/auth-client instance's `authFetch`), which
+ * attaches the bearer and, on a 401, performs exactly one single-flight
+ * refresh and one retry before giving up — never a loop. A 401 reaching the
+ * error branches here means that retry also failed and the client has
+ * already logged out; there is nothing left to clear.
+ */
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string> || {}),
   };
 
-  let res = await fetch(`${BASE_URL}${path}`, { ...options, headers: { ...headers, ...authHeader() } });
-
-  if (res.status === 401) {
-    // Single retry: refresh the access token once, then replay the request.
-    // If the refresh itself fails (no/expired refresh token, revoked family),
-    // refresh() already calls logout() — the store's accessToken/user go
-    // null, and AuthGuard reacts to that by redirecting to /login.
-    try {
-      await useAuthStore.getState().refresh();
-      res = await fetch(`${BASE_URL}${path}`, { ...options, headers: { ...headers, ...authHeader() } });
-    } catch {
-      useAuthStore.getState().logout();
-    }
-  }
+  const res = await authFetch(`${BASE_URL}${path}`, { ...options, headers });
 
   if (!res.ok) {
-    if (res.status === 401) {
-      useAuthStore.getState().logout();
-    }
     const text = await res.text();
     throw new ApiError(res.status, `${res.status}: ${text}`);
   }
@@ -57,27 +44,12 @@ export const api = {
     const formData = new FormData();
     formData.append('file', file);
 
-    const doUpload = () =>
-      fetch(`${BASE_URL}/upload`, {
-        method: 'POST',
-        headers: authHeader(),
-        body: formData,
-      });
-
-    let res = await doUpload();
-    if (res.status === 401) {
-      try {
-        await useAuthStore.getState().refresh();
-        res = await doUpload();
-      } catch {
-        useAuthStore.getState().logout();
-      }
-    }
+    const res = await authFetch(`${BASE_URL}/upload`, {
+      method: 'POST',
+      body: formData,
+    });
 
     if (!res.ok) {
-      if (res.status === 401) {
-        useAuthStore.getState().logout();
-      }
       const text = await res.text();
       throw new ApiError(res.status, `${res.status}: ${text}`);
     }
