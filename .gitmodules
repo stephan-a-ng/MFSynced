@@ -1,0 +1,3 @@
+[submodule "web/frontend/vendor/auth-client"]
+	path = web/frontend/vendor/auth-client
+	url = git@github.com:moon-five-technologies/auth-client.git

@@ -10,6 +10,9 @@ export default mergeConfig(
     test: {
       environment: "happy-dom",
       include: ["src/**/*.test.{ts,tsx}"],
+      // vendor/auth-client is a vendored git submodule (dist/ committed, no
+      // build step) — never run under this app's test config.
+      exclude: ["**/node_modules/**", "vendor/**"],
     },
   }),
 );

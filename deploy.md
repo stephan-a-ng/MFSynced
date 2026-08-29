@@ -55,6 +55,12 @@ gcloud run deploy mfsynced-api-production \
 
 ## Frontend Dashboard (staging + production)
 
+`web/frontend/vendor/auth-client` is a git submodule (`@moonfive/auth-client`,
+the argo/atm90e32 pattern) — after cloning run `git submodule update --init`
+before `npm install`. To bump it: `cd web/frontend/vendor/auth-client && git
+fetch --tags && git checkout <new-tag>`, then commit the updated submodule
+pointer from `web/frontend`.
+
 Requires `VITE_GOOGLE_CLIENT_ID` as a build arg.
 
 ```bash

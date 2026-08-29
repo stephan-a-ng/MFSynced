@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@moonfive/auth-client": "^0.1.0",
+    "@moonfive/auth-client": "file:./vendor/auth-client",
     "framer-motion": "^12.38.0",
     "lucide-react": "^1.7.0",
     "react": "^19.2.4",
