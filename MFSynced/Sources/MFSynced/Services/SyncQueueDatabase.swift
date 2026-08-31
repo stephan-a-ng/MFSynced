@@ -32,6 +32,12 @@ struct StagedCursor: Equatable {
     let backfillDone: Bool
 }
 
+struct PhoneMirrorEntry: Equatable {
+    let digits: String
+    let displayName: String?
+    let photoJPEG: Data?
+}
+
 final class SyncQueueDatabase {
     private let path: String
 
@@ -86,6 +92,15 @@ final class SyncQueueDatabase {
             )
             """
         sqlite3_exec(db, kvStateSQL, nil, nil, nil)
+        let phoneMirrorSQL = """
+            CREATE TABLE IF NOT EXISTS phone_mirror (
+                digits TEXT PRIMARY KEY,
+                display_name TEXT,
+                photo_jpeg BLOB,
+                updated_at TEXT
+            )
+            """
+        sqlite3_exec(db, phoneMirrorSQL, nil, nil, nil)
     }
 
     func enqueue(direction: String, messageGuid: String, phone: String, payload: String) throws {
@@ -367,6 +382,68 @@ final class SyncQueueDatabase {
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
         }
+    }
+
+    // MARK: - phone_mirror (server-sourced contact fallback)
+
+    func upsertPhoneMirror(_ entry: PhoneMirrorEntry) throws {
+        guard let db = open() else { throw SyncQueueError.openFailed }
+        defer { sqlite3_close(db) }
+        let sql = """
+            INSERT INTO phone_mirror (digits, display_name, photo_jpeg, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(digits) DO UPDATE SET
+                display_name = excluded.display_name,
+                photo_jpeg = excluded.photo_jpeg,
+                updated_at = excluded.updated_at
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (entry.digits as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        if let displayName = entry.displayName {
+            sqlite3_bind_text(stmt, 2, (displayName as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        } else {
+            sqlite3_bind_null(stmt, 2)
+        }
+        if let photoJPEG = entry.photoJPEG {
+            _ = photoJPEG.withUnsafeBytes { bytes in
+                sqlite3_bind_blob(stmt, 3, bytes.baseAddress, Int32(photoJPEG.count), SQLITE_TRANSIENT)
+            }
+        } else {
+            sqlite3_bind_null(stmt, 3)
+        }
+        let updatedAt = ISO8601DateFormatter().string(from: Date())
+        sqlite3_bind_text(stmt, 4, (updatedAt as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+    }
+
+    func loadPhoneMirror() throws -> [PhoneMirrorEntry] {
+        guard let db = open() else { throw SyncQueueError.openFailed }
+        defer { sqlite3_close(db) }
+        let sql = "SELECT digits, display_name, photo_jpeg FROM phone_mirror ORDER BY digits"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw SyncQueueError.queryFailed(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        var entries: [PhoneMirrorEntry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let digits = String(cString: sqlite3_column_text(stmt, 0))
+            let displayName = sqlite3_column_text(stmt, 1).map { String(cString: $0) }
+            let photoJPEG: Data?
+            if let bytes = sqlite3_column_blob(stmt, 2) {
+                photoJPEG = Data(bytes: bytes, count: Int(sqlite3_column_bytes(stmt, 2)))
+            } else {
+                photoJPEG = nil
+            }
+            entries.append(PhoneMirrorEntry(digits: digits, displayName: displayName, photoJPEG: photoJPEG))
+        }
+        return entries
     }
 }
 

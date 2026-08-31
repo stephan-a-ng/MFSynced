@@ -16,12 +16,24 @@ private func contactLog(_ message: String) {
 
 @Observable
 final class ContactStore {
+    struct PhoneDisplay {
+        let name: String?
+        let photoJPEG: Data?
+    }
+
     private var cache: [String: Contact] = [:]
     private let store = CNContactStore()
-    private var phoneToContact: [String: (name: String, photo: NSImage?)] = [:]
+    private let syncQueue: SyncQueueDatabase
+    private var phoneToContact: [String: PhoneDisplay] = [:]
+    private var phoneMirror: [String: PhoneDisplay] = [:]
     private var avatarJPEGCache: [String: Data] = [:]
     private var identifiersWithoutAvatarJPEG: Set<String> = []
     private var isLoaded = false
+
+    init(syncQueue: SyncQueueDatabase = SyncQueueDatabase()) {
+        self.syncQueue = syncQueue
+        loadPhoneMirror()
+    }
 
     func contact(for identifier: String) -> Contact {
         if let cached = cache[identifier] {
@@ -29,11 +41,11 @@ final class ContactStore {
         }
 
         // Try to resolve from pre-built phone map
-        let digits = identifier.filter { $0.isNumber }
-        let last10 = String(digits.suffix(10))
-
-        if let match = phoneToContact[digits] ?? phoneToContact[last10] {
-            let resolved = Contact(id: identifier, fullName: match.name, photo: match.photo)
+        if let match = Self.resolvePhoneDisplay(for: identifier, apple: phoneToContact, mirror: phoneMirror) {
+            let resolved = Contact(
+                id: identifier, fullName: match.name,
+                photo: match.photoJPEG.flatMap(NSImage.init(data:))
+            )
             cache[identifier] = resolved
             return resolved
         }
@@ -121,14 +133,71 @@ final class ContactStore {
     /// matching `buildPhoneMap`/`contact(for:)` already use, so an update
     /// phone in a different format (with/without country code, punctuation)
     /// still resolves to the same contact the rest of the app would.
-    private static func phoneMatchKeys(for identifier: String) -> Set<String> {
+    static func phoneMatchKeys(for identifier: String) -> Set<String> {
+        Set(phoneMatchKeyCandidates(for: identifier))
+    }
+
+    private static func phoneMatchKeyCandidates(for identifier: String) -> [String] {
         let digits = identifier.filter { $0.isNumber }
         guard !digits.isEmpty else { return [] }
-        var keys: Set<String> = [digits]
+        var keys = [digits]
         if digits.count >= 10 {
-            keys.insert(String(digits.suffix(10)))
+            keys.append(String(digits.suffix(10)))
         }
         return keys
+    }
+
+    /// Selects a display record using the exact same full-digit/last-10
+    /// matching as Contacts lookup. Apple Contacts deliberately comes first;
+    /// the server mirror only fills numbers absent from the local address book.
+    static func resolvePhoneDisplay(
+        for identifier: String,
+        apple: [String: PhoneDisplay],
+        mirror: [String: PhoneDisplay]
+    ) -> PhoneDisplay? {
+        let keys = phoneMatchKeyCandidates(for: identifier)
+        for key in keys {
+            if let match = apple[key] { return match }
+        }
+        for key in keys {
+            if let match = mirror[key] { return match }
+        }
+        return nil
+    }
+
+    /// Persists server-provided contact details to the app-local mirror only.
+    /// It intentionally does not fetch, save, or otherwise touch CNContactStore.
+    @discardableResult
+    func updatePhoneMirror(phones: [String], displayName: String?, photoJPEG: Data?) -> Bool {
+        let keys = Set(phones.flatMap(Self.phoneMatchKeys(for:)))
+        guard !keys.isEmpty else { return false }
+        do {
+            for digits in keys {
+                try syncQueue.upsertPhoneMirror(
+                    PhoneMirrorEntry(digits: digits, displayName: displayName, photoJPEG: photoJPEG)
+                )
+                phoneMirror[digits] = PhoneDisplay(name: displayName, photoJPEG: photoJPEG)
+            }
+            cache.removeAll()
+            avatarJPEGCache.removeAll()
+            identifiersWithoutAvatarJPEG.removeAll()
+            return true
+        } catch {
+            contactLog("[ContactStore] updatePhoneMirror: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private func loadPhoneMirror() {
+        do {
+            phoneMirror = Dictionary(
+                uniqueKeysWithValues: try syncQueue.loadPhoneMirror().map {
+                    ($0.digits, PhoneDisplay(name: $0.displayName, photoJPEG: $0.photoJPEG))
+                }
+            )
+        } catch {
+            contactLog("[ContactStore] loadPhoneMirror: \(error.localizedDescription)")
+        }
     }
 
     /// Splits a console `display_name` into CNContact's givenName/
@@ -263,6 +332,10 @@ final class ContactStore {
             avatarJPEGCache.removeAll()
             identifiersWithoutAvatarJPEG.removeAll()
             isLoaded = false
+            // MainActor-isolated like the phoneToContact writes in
+            // buildPhoneMap: updatePhoneMirror mutates phoneMirror from the
+            // MainActor applier, so this reload must not race it off-actor.
+            loadPhoneMirror()
         }
         await buildPhoneMap()
     }
@@ -279,7 +352,7 @@ final class ContactStore {
         ]
 
         let req = CNContactFetchRequest(keysToFetch: keysToFetch)
-        var newMap: [String: (name: String, photo: NSImage?)] = [:]
+        var newMap: [String: PhoneDisplay] = [:]
 
         do {
             try store.enumerateContacts(with: req) { cnContact, _ in
@@ -292,18 +365,10 @@ final class ContactStore {
                 }
                 guard !name.isEmpty else { return }
 
-                var photo: NSImage?
-                if let imageData = cnContact.thumbnailImageData {
-                    photo = NSImage(data: imageData)
-                }
-
                 for phoneNumber in cnContact.phoneNumbers {
-                    let digits = phoneNumber.value.stringValue.filter { $0.isNumber }
-                    let entry = (name: name, photo: photo)
-                    newMap[digits] = entry
-                    // Also key by last 10 digits for flexible matching
-                    if digits.count >= 10 {
-                        newMap[String(digits.suffix(10))] = entry
+                    let entry = PhoneDisplay(name: name, photoJPEG: cnContact.thumbnailImageData)
+                    for key in Self.phoneMatchKeys(for: phoneNumber.value.stringValue) {
+                        newMap[key] = entry
                     }
                 }
             }
@@ -320,10 +385,13 @@ final class ContactStore {
 
             // Re-resolve any cached contacts that were unresolved
             for (identifier, existing) in cache where existing.fullName == nil {
-                let digits = identifier.filter { $0.isNumber }
-                let last10 = String(digits.suffix(10))
-                if let match = completedMap[digits] ?? completedMap[last10] {
-                    cache[identifier] = Contact(id: identifier, fullName: match.name, photo: match.photo)
+                if let match = Self.resolvePhoneDisplay(
+                    for: identifier, apple: completedMap, mirror: self.phoneMirror
+                ) {
+                    cache[identifier] = Contact(
+                        id: identifier, fullName: match.name,
+                        photo: match.photoJPEG.flatMap(NSImage.init(data:))
+                    )
                 }
             }
         }
