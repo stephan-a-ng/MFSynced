@@ -77,7 +77,10 @@ final class AppState {
         // to this Mac's Address Book, applied to ANY matching local
         // contact (not just already-shared ones — Stephan's call).
         crmService?.contactUpdateApplier = { [weak self] phones, displayName, photoJPEG in
-            self?.contactStore.applyContactUpdate(
+            self?.contactStore.updatePhoneMirror(
+                phones: phones, displayName: displayName, photoJPEG: photoJPEG
+            )
+            return self?.contactStore.applyContactUpdate(
                 phones: phones, displayName: displayName, photoJPEG: photoJPEG
             ) ?? false
         }
