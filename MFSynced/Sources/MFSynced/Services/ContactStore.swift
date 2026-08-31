@@ -332,8 +332,11 @@ final class ContactStore {
             avatarJPEGCache.removeAll()
             identifiersWithoutAvatarJPEG.removeAll()
             isLoaded = false
+            // MainActor-isolated like the phoneToContact writes in
+            // buildPhoneMap: updatePhoneMirror mutates phoneMirror from the
+            // MainActor applier, so this reload must not race it off-actor.
+            loadPhoneMirror()
         }
-        loadPhoneMirror()
         await buildPhoneMap()
     }
 
