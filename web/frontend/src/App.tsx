@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { LogOut } from 'lucide-react';
 import { useAuthStore } from './shared/auth/store';
-import { startProactiveRefresh } from './shared/auth/scheduler';
 import { ThemeToggle } from './components/ThemeToggle';
 import { FlowerMark } from './components/brand/FlowerMark';
 import { BrandLoader } from './components/brand/BrandLoader';
@@ -22,7 +21,10 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   const [hydrating, setHydrating] = useState(true);
 
   useEffect(() => {
-    startProactiveRefresh();
+    // loadUser() resolves /v1/auth/config first (loadConfig()), which
+    // constructs and starts the @moonfive/auth-client instance — arming its
+    // proactive-refresh timer and cross-tab storage/focus listeners. There is
+    // no separate startProactiveRefresh() call anymore.
     if (accessToken) {
       loadUser()
         .catch(() => {})

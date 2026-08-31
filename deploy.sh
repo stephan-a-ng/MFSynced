@@ -110,6 +110,16 @@ if [[ "$SERVICE" == "backend" || "$SERVICE" == "all" ]]; then
 fi
 if [[ "$SERVICE" == "frontend" || "$SERVICE" == "all" ]]; then
   echo "==> Pre-deploy: frontend build..."
+  # @moonfive/auth-client is vendored as a git submodule at
+  # web/frontend/vendor/auth-client (pinned tag, dist/ committed — no build
+  # step). Guard against building from a checkout where it was never
+  # initialized — npm ci would otherwise fail deep inside the build with a
+  # confusing "no matching version" error.
+  if [[ ! -f "$FRONTEND_DIR/vendor/auth-client/package.json" ]]; then
+    echo "ABORT: web/frontend/vendor/auth-client is empty — run" >&2
+    echo "       'git submodule update --init' and retry." >&2
+    exit 1
+  fi
   # Fresh checkouts/worktrees have no node_modules — install before building.
   [[ -d "$FRONTEND_DIR/node_modules" ]] || (cd "$FRONTEND_DIR" && npm ci)
   (cd "$FRONTEND_DIR" && npm run build) || {

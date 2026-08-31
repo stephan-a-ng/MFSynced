@@ -6,7 +6,10 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist']),
+  // vendor/auth-client is a vendored git submodule (dist/ committed, no
+  // build step) — its own source/tests are out of scope for this app's
+  // lint config.
+  globalIgnores(['dist', 'vendor']),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

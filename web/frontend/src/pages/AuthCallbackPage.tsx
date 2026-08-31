@@ -11,7 +11,7 @@ import { useAuthStore } from '../shared/auth/store';
 export function AuthCallbackPage() {
   const [params] = useSearchParams();
   const navigate = useNavigate();
-  const { setTokens, loadUser } = useAuthStore();
+  const { loadUser } = useAuthStore();
   const [error, setError] = useState<string | null>(null);
   // completeLogin() consumes the one-shot sessionStorage entry on first run,
   // so we MUST NOT re-enter — StrictMode dev double-invokes, browser bfcache
@@ -37,19 +37,16 @@ export function AuthCallbackPage() {
 
     void (async () => {
       try {
-        const { tokens, returnTo } = await completeLogin(code, state);
-        setTokens({
-          accessToken: tokens.accessToken,
-          refreshToken: tokens.refreshToken,
-          expiresAt: Date.now() + tokens.expiresIn * 1000,
-        });
+        // completeLogin() persists the token set itself (inside the
+        // @moonfive/auth-client instance) — no more setTokens() call here.
+        const { returnTo } = await completeLogin(code, state);
         await loadUser();
-        navigate(returnTo, { replace: true });
+        navigate(returnTo ?? '/', { replace: true });
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Sign-in failed');
       }
     })();
-  }, [params, navigate, setTokens, loadUser]);
+  }, [params, navigate, loadUser]);
 
   if (error) {
     return (
