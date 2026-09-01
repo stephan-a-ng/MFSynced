@@ -64,6 +64,15 @@ struct SidebarView: View {
             } else {
                 conversationsList
             }
+
+            Divider()
+
+            Text(appVersionLabel())
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
         }
     }
 
