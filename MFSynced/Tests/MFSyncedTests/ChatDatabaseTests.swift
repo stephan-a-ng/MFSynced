@@ -101,8 +101,8 @@ final class ChatDatabaseTests: XCTestCase {
         }
     }
 
-    func testFetchParticipantsReturnsStableHandlesForGroupAndOneToOneChat() {
-        let participants = db.fetchParticipants(chatIdentifiers: [
+    func testFetchParticipantsReturnsStableHandlesForGroupAndOneToOneChat() throws {
+        let participants = try db.fetchParticipants(chatIdentifiers: [
             "chat-fixture-group", "+15550000001"
         ])
 
@@ -113,17 +113,35 @@ final class ChatDatabaseTests: XCTestCase {
         XCTAssertEqual(participants["+15550000001"], ["+15550000001"])
     }
 
-    func testFetchParticipantsOmitsUnknownChatAndBatchesMoreThanFiveHundredIdentifiers() {
-        let identifiers = ["chat-fixture-group"]
-            + (0..<501).map { "unknown-chat-\($0)" }
+    func testFetchParticipantsOmitsUnknownChatAndBatchesMoreThanFiveHundredIdentifiers() throws {
+        let identifiers = (0..<501).map { "unknown-chat-\($0)" }
+            + ["chat-fixture-group"]
 
-        let participants = db.fetchParticipants(chatIdentifiers: identifiers)
+        let participants = try db.fetchParticipants(chatIdentifiers: identifiers)
 
         XCTAssertEqual(
             participants["chat-fixture-group"],
             ["+15550000002", "+15550000003", "+15550000004"]
         )
         XCTAssertNil(participants["unknown-chat-0"])
+    }
+
+    func testFetchParticipantsThrowsWhenJoinTableIsMissing() throws {
+        let dbURL = fixtureDirectory.appendingPathComponent("chat.db")
+        var connection: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(dbURL.path, &connection), SQLITE_OK)
+        defer { sqlite3_close(connection) }
+        XCTAssertEqual(sqlite3_exec(connection, "DROP TABLE chat_handle_join", nil, nil, nil), SQLITE_OK)
+
+        XCTAssertThrowsError(
+            try db.fetchParticipants(chatIdentifiers: ["chat-fixture-group"])
+        ) { error in
+            guard case let ChatDBError.participantFetchFailed(chunkIndex, message) = error else {
+                return XCTFail("Expected participant fetch error, got \(error)")
+            }
+            XCTAssertEqual(chunkIndex, 0)
+            XCTAssertTrue(message.localizedCaseInsensitiveContains("chat_handle_join"))
+        }
     }
 
     func testGuidForChatIdentifier() {

@@ -382,12 +382,14 @@ final class ChatDatabase: @unchecked Sendable {
     /// Returns handle IDs keyed by chat identifier. Each query covers up to
     /// 500 identifiers, preserving handle ROWID order within every chat.
     /// Missing chats and chats without joined handles have no dictionary key.
-    func fetchParticipants(chatIdentifiers: [String]) -> [String: [String]] {
-        guard !chatIdentifiers.isEmpty, let db = try? openConnection() else { return [:] }
+    func fetchParticipants(chatIdentifiers: [String]) throws -> [String: [String]] {
+        guard !chatIdentifiers.isEmpty else { return [:] }
+        let db = try openConnection()
         defer { sqlite3_close(db) }
 
         var participants: [String: [String]] = [:]
         for start in stride(from: 0, to: chatIdentifiers.count, by: 500) {
+            let chunkIndex = start / 500
             let end = min(start + 500, chatIdentifiers.count)
             let identifiers = chatIdentifiers[start..<end]
             let placeholders = Array(repeating: "?", count: identifiers.count).joined(separator: ", ")
@@ -401,27 +403,44 @@ final class ChatDatabase: @unchecked Sendable {
                 """
 
             var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { continue }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw ChatDBError.participantFetchFailed(
+                    chunkIndex: chunkIndex,
+                    message: String(cString: sqlite3_errmsg(db))
+                )
+            }
+            defer { sqlite3_finalize(stmt) }
             for (offset, identifier) in identifiers.enumerated() {
                 sqlite3_bind_text(stmt, Int32(offset + 1), (identifier as NSString).utf8String, -1, SQLITE_TRANSIENT)
             }
-            while sqlite3_step(stmt) == SQLITE_ROW {
+            var stepResult: Int32
+            repeat {
+                stepResult = sqlite3_step(stmt)
+                guard stepResult == SQLITE_ROW else { break }
                 guard let chatIdentifier = columnText(stmt, 0), let handleID = columnText(stmt, 1) else { continue }
                 participants[chatIdentifier, default: []].append(handleID)
+            } while true
+            guard stepResult == SQLITE_DONE else {
+                throw ChatDBError.participantFetchFailed(
+                    chunkIndex: chunkIndex,
+                    message: String(cString: sqlite3_errmsg(db))
+                )
             }
-            sqlite3_finalize(stmt)
         }
         return participants
     }
 
-    /// The Messages database GUID for a chat identifier, or nil when the
-    /// identifier is unknown or the database cannot be read.
+    /// The Messages database GUID (globally unique identifier) for a chat
+    /// identifier, or nil when the identifier is unknown or the database
+    /// cannot be read. iMessage and Short Message Service (SMS)/Rich
+    /// Communication Services (RCS) rows can share a chat identifier, so the
+    /// oldest row wins deterministically.
     func guid(forChatIdentifier chatIdentifier: String) -> String? {
         guard let db = try? openConnection() else { return nil }
         defer { sqlite3_close(db) }
 
         var stmt: OpaquePointer?
-        let sql = "SELECT guid FROM chat WHERE chat_identifier = ? LIMIT 1"
+        let sql = "SELECT guid FROM chat WHERE chat_identifier = ? ORDER BY ROWID ASC LIMIT 1"
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, (chatIdentifier as NSString).utf8String, -1, SQLITE_TRANSIENT)
@@ -467,7 +486,7 @@ final class ChatDatabase: @unchecked Sendable {
                 messageCount: Int(sqlite3_column_int(stmt, 4))
             ))
         }
-        let participants = includeGroups ? fetchParticipants(chatIdentifiers: rows.map(\.identifier)) : [:]
+        let participants = includeGroups ? try fetchParticipants(chatIdentifiers: rows.map(\.identifier)) : [:]
         return rows.map { row in
             ChatCatalogEntry(
                 chatIdentifier: row.identifier,
@@ -562,11 +581,14 @@ final class ChatDatabase: @unchecked Sendable {
 enum ChatDBError: Error, LocalizedError {
     case openFailed(String)
     case queryFailed(String)
+    case participantFetchFailed(chunkIndex: Int, message: String)
 
     var errorDescription: String? {
         switch self {
         case .openFailed(let msg): return "Failed to open chat.db: \(msg)"
         case .queryFailed(let msg): return "Query failed: \(msg)"
+        case .participantFetchFailed(let chunkIndex, let message):
+            return "Participant fetch failed for chunk \(chunkIndex): \(message)"
         }
     }
 }
