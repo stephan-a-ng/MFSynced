@@ -48,3 +48,39 @@ grants like Full Disk Access survive app updates — unlike the old ad-hoc
 
 `build-app.sh` (ad-hoc, debug) remains the fast local dev loop; it is not
 for distribution.
+
+## Publishing to apps.moonfive.tech (distribution)
+
+A built zip is not a release until the Moon Five app portal serves it.
+The portal repo is `/Users/stephan/MoonFive/apps` (LOCAL-ONLY git, no
+remote — its release commits land directly on its `main`; background
+sessions edit via a linked worktree).
+
+Rules (cited as REL-1 … REL-5; also inlined in this repo's CLAUDE.md):
+
+1. **REL-1 — version source of truth.** Read the currently published
+   version from `app/catalog.ts` in the apps repo and bump it. Never
+   trust memory, fleet notes, or old zips in `dist/` — the portal
+   catalog is the only authority (a 1.2 was once built while the portal
+   already served 1.5; it had to be rebuilt as 1.6).
+2. **REL-2 — build.** `cd MFSynced && VERSION=<v> ./build-release.sh`
+   (see the setup sections above). Confirm notarization: `accepted,
+   source=Notarized Developer ID`.
+3. **REL-3 — upload.**
+   `gsutil cp MFSynced/dist/PhoneSync-<v>.zip gs://moonfive-app-releases/phonesync/releases/<v>/PhoneSync.zip`
+   — note the object is named `PhoneSync.zip` (unversioned) inside the
+   versioned folder. Bucket objects are public.
+4. **REL-4 — portal pins + deploy.** In the apps repo bump
+   `app/catalog.ts` (both `version:` and `downloadUrl:`) and the pins in
+   `tests/rendered-html.test.mjs`. A coupling test there asserts the
+   downloadUrl embeds the same version as `version:` — so a missed pin
+   fails `npm test` (and the deploy, which runs the tests). Then
+   `./deploy.sh staging`, verify, `./deploy.sh production`. Staging
+   always first.
+5. **REL-5 — verify.** Unauthenticated
+   `curl -sI https://storage.googleapis.com/moonfive-app-releases/phonesync/releases/<v>/PhoneSync.zip`
+   → 200 with the full byte size, and apps.moonfive.tech lists `<v>`
+   with a working "Download for Mac OS".
+
+Installing on a target Mac (drag to /Applications + TCC grants) is
+unchanged — see "Installing on a target Mac" above.
