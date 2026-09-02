@@ -379,25 +379,91 @@ final class ChatDatabase: @unchecked Sendable {
         return conversations
     }
 
-    /// Metadata-only catalog of every 1:1 conversation for the nexus
-    /// candidate-review tab — NEVER message bodies. Group chats
-    /// (chat.style == 43, the same value Conversation.isGroup / Message.isGroup
-    /// already treat as "group" elsewhere in this file) are excluded; every
-    /// other style value is treated as 1:1 (observed as 45 on this schema)
-    /// rather than hard-coding a second magic number the rest of the
-    /// codebase doesn't rely on.
-    func fetchCatalog() throws -> [ChatCatalogEntry] {
+    /// Returns handle IDs keyed by chat identifier. Each query covers up to
+    /// 500 identifiers, preserving handle ROWID order within every chat.
+    /// Missing chats and chats without joined handles have no dictionary key.
+    func fetchParticipants(chatIdentifiers: [String]) throws -> [String: [String]] {
+        guard !chatIdentifiers.isEmpty else { return [:] }
+        let db = try openConnection()
+        defer { sqlite3_close(db) }
+
+        var participants: [String: [String]] = [:]
+        for start in stride(from: 0, to: chatIdentifiers.count, by: 500) {
+            let chunkIndex = start / 500
+            let end = min(start + 500, chatIdentifiers.count)
+            let identifiers = chatIdentifiers[start..<end]
+            let placeholders = Array(repeating: "?", count: identifiers.count).joined(separator: ", ")
+            let sql = """
+                SELECT c.chat_identifier, h.id
+                FROM chat c
+                JOIN chat_handle_join chj ON c.ROWID = chj.chat_id
+                JOIN handle h ON chj.handle_id = h.ROWID
+                WHERE c.chat_identifier IN (\(placeholders))
+                ORDER BY c.chat_identifier ASC, h.ROWID ASC
+                """
+
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                throw ChatDBError.participantFetchFailed(
+                    chunkIndex: chunkIndex,
+                    message: String(cString: sqlite3_errmsg(db))
+                )
+            }
+            defer { sqlite3_finalize(stmt) }
+            for (offset, identifier) in identifiers.enumerated() {
+                sqlite3_bind_text(stmt, Int32(offset + 1), (identifier as NSString).utf8String, -1, SQLITE_TRANSIENT)
+            }
+            var stepResult: Int32
+            repeat {
+                stepResult = sqlite3_step(stmt)
+                guard stepResult == SQLITE_ROW else { break }
+                guard let chatIdentifier = columnText(stmt, 0), let handleID = columnText(stmt, 1) else { continue }
+                participants[chatIdentifier, default: []].append(handleID)
+            } while true
+            guard stepResult == SQLITE_DONE else {
+                throw ChatDBError.participantFetchFailed(
+                    chunkIndex: chunkIndex,
+                    message: String(cString: sqlite3_errmsg(db))
+                )
+            }
+        }
+        return participants
+    }
+
+    /// The Messages database GUID (globally unique identifier) for a chat
+    /// identifier, or nil when the identifier is unknown or the database
+    /// cannot be read. iMessage and Short Message Service (SMS)/Rich
+    /// Communication Services (RCS) rows can share a chat identifier, so the
+    /// oldest row wins deterministically.
+    func guid(forChatIdentifier chatIdentifier: String) -> String? {
+        guard let db = try? openConnection() else { return nil }
+        defer { sqlite3_close(db) }
+
+        var stmt: OpaquePointer?
+        let sql = "SELECT guid FROM chat WHERE chat_identifier = ? ORDER BY ROWID ASC LIMIT 1"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, (chatIdentifier as NSString).utf8String, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return columnText(stmt, 0)
+    }
+
+    /// Metadata-only catalog for the nexus candidate-review tab — NEVER
+    /// message bodies. By default, group chats (chat.style == 43) remain
+    /// excluded; `includeGroups` adds them with their display name and joined
+    /// handle IDs while leaving existing callers behavior-neutral.
+    func fetchCatalog(includeGroups: Bool = false) throws -> [ChatCatalogEntry] {
         let db = try openConnection()
         defer { sqlite3_close(db) }
 
         let sql = """
-            SELECT c.chat_identifier, c.display_name,
+            SELECT c.chat_identifier, c.display_name, c.style,
                 MAX(m.date) AS last_message_date,
                 COUNT(m.ROWID) AS message_count
             FROM chat c
             LEFT JOIN chat_message_join cmj ON c.ROWID = cmj.chat_id
             LEFT JOIN message m ON cmj.message_id = m.ROWID
-            WHERE c.style != 43
+            \(includeGroups ? "" : "WHERE c.style != 43")
             GROUP BY c.chat_identifier
             HAVING last_message_date IS NOT NULL
             ORDER BY last_message_date DESC
@@ -409,17 +475,29 @@ final class ChatDatabase: @unchecked Sendable {
         }
         defer { sqlite3_finalize(stmt) }
 
-        var entries: [ChatCatalogEntry] = []
+        var rows: [(identifier: String, displayName: String?, isGroup: Bool, lastActivityAt: Date?, messageCount: Int)] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let identifier = columnText(stmt, 0) else { continue }
-            entries.append(ChatCatalogEntry(
-                chatIdentifier: identifier,
+            rows.append((
+                identifier: identifier,
                 displayName: columnText(stmt, 1),
-                lastActivityAt: AppleDateConverter.toDate(sqlite3_column_int64(stmt, 2)),
-                messageCount: Int(sqlite3_column_int(stmt, 3))
+                isGroup: sqlite3_column_int(stmt, 2) == 43,
+                lastActivityAt: AppleDateConverter.toDate(sqlite3_column_int64(stmt, 3)),
+                messageCount: Int(sqlite3_column_int(stmt, 4))
             ))
         }
-        return entries
+        let participants = includeGroups ? try fetchParticipants(chatIdentifiers: rows.map(\.identifier)) : [:]
+        return rows.map { row in
+            ChatCatalogEntry(
+                chatIdentifier: row.identifier,
+                displayName: row.displayName,
+                lastActivityAt: row.lastActivityAt,
+                messageCount: row.messageCount,
+                isGroup: row.isGroup,
+                groupName: row.isGroup && !(row.displayName?.isEmpty ?? true) ? row.displayName : nil,
+                participants: participants[row.identifier] ?? []
+            )
+        }
     }
 
     func searchMessages(query: String, limit: Int = 50) throws -> [Message] {
@@ -503,11 +581,14 @@ final class ChatDatabase: @unchecked Sendable {
 enum ChatDBError: Error, LocalizedError {
     case openFailed(String)
     case queryFailed(String)
+    case participantFetchFailed(chunkIndex: Int, message: String)
 
     var errorDescription: String? {
         switch self {
         case .openFailed(let msg): return "Failed to open chat.db: \(msg)"
         case .queryFailed(let msg): return "Query failed: \(msg)"
+        case .participantFetchFailed(let chunkIndex, let message):
+            return "Participant fetch failed for chunk \(chunkIndex): \(message)"
         }
     }
 }

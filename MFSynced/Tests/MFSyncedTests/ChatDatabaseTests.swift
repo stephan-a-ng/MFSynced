@@ -101,6 +101,63 @@ final class ChatDatabaseTests: XCTestCase {
         }
     }
 
+    func testFetchParticipantsReturnsStableHandlesForGroupAndOneToOneChat() throws {
+        let participants = try db.fetchParticipants(chatIdentifiers: [
+            "chat-fixture-group", "+15550000001"
+        ])
+
+        XCTAssertEqual(
+            participants["chat-fixture-group"],
+            ["+15550000002", "+15550000003", "+15550000004"]
+        )
+        XCTAssertEqual(participants["+15550000001"], ["+15550000001"])
+    }
+
+    func testFetchParticipantsOmitsUnknownChatAndBatchesMoreThanFiveHundredIdentifiers() throws {
+        let identifiers = (0..<501).map { "unknown-chat-\($0)" }
+            + ["chat-fixture-group"]
+
+        let participants = try db.fetchParticipants(chatIdentifiers: identifiers)
+
+        XCTAssertEqual(
+            participants["chat-fixture-group"],
+            ["+15550000002", "+15550000003", "+15550000004"]
+        )
+        XCTAssertNil(participants["unknown-chat-0"])
+    }
+
+    func testFetchParticipantsThrowsWhenJoinTableIsMissing() throws {
+        let dbURL = fixtureDirectory.appendingPathComponent("chat.db")
+        var connection: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(dbURL.path, &connection), SQLITE_OK)
+        defer { sqlite3_close(connection) }
+        XCTAssertEqual(sqlite3_exec(connection, "DROP TABLE chat_handle_join", nil, nil, nil), SQLITE_OK)
+
+        XCTAssertThrowsError(
+            try db.fetchParticipants(chatIdentifiers: ["chat-fixture-group"])
+        ) { error in
+            guard case let ChatDBError.participantFetchFailed(chunkIndex, message) = error else {
+                return XCTFail("Expected participant fetch error, got \(error)")
+            }
+            XCTAssertEqual(chunkIndex, 0)
+            XCTAssertTrue(message.localizedCaseInsensitiveContains("chat_handle_join"))
+        }
+    }
+
+    func testGuidForChatIdentifier() {
+        XCTAssertEqual(db.guid(forChatIdentifier: "chat-fixture-group"), "iMessage;+chat-fixture-group")
+        XCTAssertNil(db.guid(forChatIdentifier: "unknown-chat"))
+    }
+
+    func testFetchCatalogIncludingGroupsAddsGroupMetadataAndParticipants() throws {
+        let catalog = try db.fetchCatalog(includeGroups: true)
+        let group = try XCTUnwrap(catalog.first { $0.chatIdentifier == "chat-fixture-group" })
+
+        XCTAssertTrue(group.isGroup)
+        XCTAssertEqual(group.groupName, "Family")
+        XCTAssertEqual(group.participants, ["+15550000002", "+15550000003", "+15550000004"])
+    }
+
     func testServiceForChatReturnsKnownService() throws {
         let conversations = try db.fetchConversations()
         let first = try XCTUnwrap(conversations.first)
@@ -129,10 +186,12 @@ final class ChatDatabaseTests: XCTestCase {
             CREATE TABLE chat (
                 ROWID INTEGER PRIMARY KEY,
                 chat_identifier TEXT,
+                guid TEXT,
                 display_name TEXT,
                 style INTEGER,
                 service_name TEXT
             );
+            CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
             CREATE TABLE message (
                 ROWID INTEGER PRIMARY KEY,
                 guid TEXT,
@@ -156,10 +215,14 @@ final class ChatDatabaseTests: XCTestCase {
             );
             CREATE TABLE message_attachment_join (message_id INTEGER, attachment_id INTEGER);
 
-            INSERT INTO handle (ROWID, id) VALUES (1, '+15550000001'), (2, '+15550000002');
-            INSERT INTO chat (ROWID, chat_identifier, display_name, style, service_name)
-                VALUES (1, '+15550000001', 'Fixture Contact', 45, 'iMessage'),
-                       (2, 'chat-fixture-group', 'Fixture Group', 43, 'SMS');
+            INSERT INTO handle (ROWID, id) VALUES
+                (1, '+15550000001'), (2, '+15550000002'),
+                (3, '+15550000003'), (4, '+15550000004');
+            INSERT INTO chat (ROWID, chat_identifier, guid, display_name, style, service_name)
+                VALUES (1, '+15550000001', 'iMessage;+15550000001', 'Fixture Contact', 45, 'iMessage'),
+                       (2, 'chat-fixture-group', 'iMessage;+chat-fixture-group', 'Family', 43, 'SMS');
+            INSERT INTO chat_handle_join (chat_id, handle_id)
+                VALUES (1, 1), (2, 2), (2, 3), (2, 4);
             INSERT INTO message (
                 ROWID, guid, text, is_from_me, date, date_edited,
                 associated_message_type, cache_has_attachments, service, handle_id
