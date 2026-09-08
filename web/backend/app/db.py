@@ -27,6 +27,11 @@ def pool_settings() -> dict[str, int]:
 async def init_pool(dsn: str):
     global pool
     pool = await asyncpg.create_pool(dsn, **pool_settings())
+    # With min_size=0 asyncpg opens nothing eagerly, so a bad DSN would only
+    # surface on the first request. Touch one connection so boot still fails
+    # fast; it goes straight back to the pool.
+    async with pool.acquire():
+        pass
 
 async def close_pool():
     global pool
